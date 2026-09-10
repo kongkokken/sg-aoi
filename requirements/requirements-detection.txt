@@ -1,0 +1,21 @@
+# Branch A: detection (PaddlePaddle + PaddleDetection)
+# Create a dedicated env, e.g.: conda create -n aoi-detect python=3.10 -y
+#
+# GPU build (CUDA 11.x example) — pick the wheel matching your CUDA version
+# from https://www.paddlepaddle.org.cn/install/quick :
+#   python -m pip install paddlepaddle-gpu==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu118/
+# CPU-only fallback:
+#   python -m pip install paddlepaddle
+#
+# (Paddle wheels are intentionally not pinned here because the install command
+#  differs per CUDA version. Install paddlepaddle[-gpu] first, then the rest.)
+
+paddlepaddle>=2.6           # or paddlepaddle-gpu, installed separately per above
+pycocotools>=2.0.7
+opencv-python>=4.8
+PyYAML>=6.0
+tqdm>=4.64
+scipy>=1.10
+shapely>=2.0
+# PaddleDetection itself is used from a cloned git repo, not from pip:
+#   git clone https://github.com/PaddlePaddle/PaddleDetection.git

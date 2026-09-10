@@ -1,0 +1,86 @@
+# =============================================================================
+# PP-YOLOE+ fine-tuning config for a custom PCBA component dataset
+# =============================================================================
+# Place this file inside a cloned PaddleDetection repo, e.g.:
+#   PaddleDetection/configs/ppyoloe/ppyoloe_plus_custom.yml
+# and run:
+#   python tools/train.py -c configs/ppyoloe/ppyoloe_plus_custom.yml --eval
+#
+# It inherits the PP-YOLOE+ small-variant recipe and only overrides what a
+# small custom dataset needs: num_classes, dataset paths, and gentler
+# training hyperparameters.
+#
+# NOTE: relative paths below are resolved against the PaddleDetection repo
+# root. The simplest setup is to symlink or copy pcba-aoi/data/detection_dataset
+# into PaddleDetection/dataset/pcba_components/ — or adjust the paths here.
+
+_BASE_: [
+  'ppyoloe_plus_crn_s_80e_coco.yml',   # model architecture: PP-YOLOE+ CRN small
+]
+
+# ---- model ---------------------------------------------------------------
+# TODO: set this to the number of component classes in your dataset
+# (e.g. resistor_0603, capacitor_0603, ic_sop8, connector_pinheader, ...).
+# The class names must match data/detection_dataset/annotations/*.json and
+# data/golden/expected_components.json.
+num_classes: 8   # <-- CHANGE ME
+
+# ---- training schedule (tuned down for small datasets) -------------------
+epoch: 80            # 80 epochs is plenty when fine-tuning from COCO weights
+snapshot_epoch: 10
+log_iter: 20
+
+# Fine-tuning from COCO-pretrained weights is strongly recommended for
+# 50-100 board images; training from scratch will not converge usefully.
+# Download once (network step, done manually):
+#   wget https://paddledet.bj.bcebos.com/models/ppyoloe_plus_crn_s_80e_coco.pdparams
+pretrain_weights: pretrained/ppyoloe_plus_crn_s_80e_coco.pdparams
+
+LearningRate:
+  base_lr: 0.0005          # lower than the from-scratch recipe (0.001)
+  schedulers:
+    - !CosineDecay
+      max_epochs: 88       # cosine decay horizon slightly past total epochs
+    - !LinearWarmup
+      start_factor: 0.01
+      steps: 300
+
+# ---- input size ----------------------------------------------------------
+# 640 matches the default PP-YOLOE+ eval size; keep it unless your components
+# are extremely small on the board, in which case go UP (e.g. 768) rather
+# than down — small parts are exactly what this detector must not miss.
+# (The eval size comes from the inherited _BASE_ config's EvalReader; override
+#  there if needed.)
+
+# ---- dataset (COCO format) ----------------------------------------------
+metric: COCO
+
+TrainDataset:
+  !COCODataSet
+    image_dir: images/train
+    anno_path: annotations/instances_train.json
+    dataset_dir: dataset/pcba_components   # see note at top
+    data_fields: ['image', 'gt_bbox', 'gt_class', 'is_crowd']
+
+EvalDataset:
+  !COCODataSet
+    image_dir: images/val
+    anno_path: annotations/instances_val.json
+    dataset_dir: dataset/pcba_components
+    data_fields: ['image', 'gt_bbox', 'gt_class', 'is_crowd']
+
+TestDataset:
+  !ImageFolder
+    anno_path: annotations/instances_val.json   # used only to map class names
+    dataset_dir: dataset/pcba_components
+
+# ---- data loading --------------------------------------------------------
+worker_num: 4          # set to 2 on Windows if you hit dataloader issues
+train_batch_size: 8    # drop to 4 if you run out of VRAM at 640px
+
+# ---- augmentation ---------------------------------------------------------
+# Inherited from the _BASE_ config. IMPORTANT for PCBA: the default recipe
+# includes RandomFlip. Board orientation is semantically meaningful (a
+# mirrored board is a *wrong* board), so if you customize the transform list,
+# keep RandomFlip disabled and avoid free rotation; small translation/scale/
+# brightness jitter is safe. See docs/data_collection_guide.md.

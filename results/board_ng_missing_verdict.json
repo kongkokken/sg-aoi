@@ -1,0 +1,18 @@
+{
+  "board_id": "board_ng_missing",
+  "verdict": "NG",
+  "defects": [
+    {
+      "type": "missing_part",
+      "location": [
+        1400.0,
+        425.0,
+        40.0,
+        150.0
+      ],
+      "confidence": 1.0,
+      "branch": "A",
+      "detail": "Expected R7 (resistor_axial) not detected."
+    }
+  ]
+}

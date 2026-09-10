@@ -1,0 +1,10 @@
+# Root requirements for Streamlit Community Cloud (and other free hosts).
+# Minimal set to run the app in DEMO MODE — no paddlepaddle / anomalib needed:
+# demo detections come from data/demo/detections_*.json via detection.precomputed_json.
+# NOTE: opencv-python-headless, NOT opencv-python (cloud servers have no display).
+
+streamlit==1.41.1
+pillow==11.0.0
+numpy==2.1.3
+PyYAML==6.0.2
+opencv-python-headless==4.10.0.84

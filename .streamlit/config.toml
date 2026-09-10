@@ -1,0 +1,19 @@
+# Streamlit server + theme configuration for the PCBA AOI demo.
+
+[server]
+# No browser auto-open, no CORS prompts — required on headless cloud hosts.
+headless = true
+# Board photos from a phone/webcam are typically 2–10 MB.
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+# Clean light theme matching the factory HMI look.
+base = "light"
+primaryColor = "#2563eb"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f1f5f9"
+textColor = "#0f172a"
+font = "sans serif"

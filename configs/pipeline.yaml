@@ -1,0 +1,64 @@
+# =============================================================================
+# Decision-engine configuration for the combined AOI pipeline
+# Consumed by src/infer_pipeline.py and src/app.py
+# =============================================================================
+
+# --- Branch A: PP-YOLOE+ detection (exported Paddle inference model) -------
+detection:
+  # Directory produced by PaddleDetection's tools/export_model.py, containing
+  # model.pdmodel / model.pdiparams / infer_cfg.yml.
+  model_dir: "models/detection/pcba_ppyoloe"
+  # Minimum detection confidence to treat a component as present.
+  # 0.5 is a safe start; small passives may need 0.4 — validate per class.
+  confidence_threshold: 0.5
+  # Device for paddle inference: "cpu" or "gpu"
+  device: "cpu"
+  # Optional: path to a JSON file with precomputed detections, used instead
+  # of running the model (useful before the detector is trained, and for
+  # offline debugging of the rule engine). Format:
+  #   [{"class": "resistor_0603", "bbox": [x, y, w, h], "score": 0.93}, ...]
+  precomputed_json: null
+
+# --- Branch B: PatchCore anomaly detection ---------------------------------
+anomaly:
+  # Exported model from src/train_anomaly.py: an OpenVINO directory or a
+  # torch .ckpt. The pipeline auto-detects which.
+  model_path: "models/anomaly/patchcore/openvino"
+  # Anomaly-score threshold on the [0, 1] normalized score; a board region
+  # above this is flagged as scratch / debris / foreign particle.
+  # Tune on the boards_ng validation set — start high (fewer false alarms)
+  # and lower it until real defects are caught.
+  score_threshold: 0.5
+  # Minimum pixel area of an anomaly region to report (filters speck noise).
+  min_region_area: 64
+  device: "cpu"
+
+# --- Golden reference / rule engine ----------------------------------------
+golden:
+  image: "data/golden/golden_board.jpg"
+  expected_components: "data/golden/expected_components.json"
+  # IoU between a detection and an expected component bbox at which they are
+  # considered "the same part". 0.4 is lenient enough for small part jitter.
+  match_iou: 0.4
+  # Acceptable orientation error in degrees between the estimated and the
+  # expected component angle (aspect-ratio heuristic is coarse — keep loose).
+  orientation_tolerance_deg: 30
+
+# --- Which defect checks are active ----------------------------------------
+# Phase 1 scope: missing parts + wrong parts ONLY (Branch A, component side).
+# The other four checks are deferred: orientation is a future Branch-A
+# refinement; scratches / solder balls / foreign particles need Branch B
+# (anomaly model) — enable them only when that branch is activated.
+checks:
+  missing_part: true      # expected component has no detection       (Branch A, PHASE 1)
+  wrong_part: true        # detected class != expected class          (Branch A, PHASE 1)
+  wrong_orientation: false # deferred — future Branch-A refinement (aspect heuristic is coarse)
+  scratches: false         # deferred — enable when anomaly branch is activated
+  solder_balls: false      # deferred — enable when anomaly branch is activated
+  foreign_particles: false # deferred — enable when anomaly branch is activated
+
+# --- Output -----------------------------------------------------------------
+output:
+  results_dir: "results"
+  save_annotated: true
+  save_json: true

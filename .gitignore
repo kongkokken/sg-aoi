@@ -1,0 +1,35 @@
+# --- Python / venv -----------------------------------------------------------
+.venv-demo/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# --- Large / regenerable data (keep the demo + golden assets!) ---------------
+# Raw webcam capture sessions (large, local-only).
+data/raw/captures/
+# Detection training dataset images (large; keep the annotation scaffolding).
+data/detection_dataset/images/train/*
+data/detection_dataset/images/val/*
+!data/detection_dataset/images/train/.gitkeep
+!data/detection_dataset/images/val/.gitkeep
+# Trained model artifacts are far too large for git / free hosting.
+models/*
+!models/.gitkeep
+
+# --- Runtime output ----------------------------------------------------------
+# Keep the small ready-made demo verdicts (good Review History content) but
+# ignore anything new the app writes at runtime on a host.
+results/*
+!results/.gitkeep
+!results/board_ok_verdict.json
+!results/board_ok_annotated.jpg
+!results/board_ng_missing_verdict.json
+!results/board_ng_missing_annotated.jpg
+
+# --- OS / editor -------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

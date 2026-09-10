@@ -1,0 +1,172 @@
+[
+  {
+    "class": "resistor_axial",
+    "bbox": [
+      125,
+      180,
+      150,
+      40
+    ],
+    "score": 0.93
+  },
+  {
+    "class": "resistor_axial",
+    "bbox": [
+      410,
+      115,
+      40,
+      150
+    ],
+    "score": 0.86
+  },
+  {
+    "class": "resistor_axial",
+    "bbox": [
+      565,
+      180,
+      150,
+      40
+    ],
+    "score": 0.85
+  },
+  {
+    "class": "resistor_axial",
+    "bbox": [
+      785,
+      175,
+      150,
+      40
+    ],
+    "score": 0.95
+  },
+  {
+    "class": "resistor_axial",
+    "bbox": [
+      1015,
+      180,
+      150,
+      40
+    ],
+    "score": 0.92
+  },
+  {
+    "class": "resistor_axial",
+    "bbox": [
+      1245,
+      175,
+      150,
+      40
+    ],
+    "score": 0.88
+  },
+  {
+    "class": "resistor_axial",
+    "bbox": [
+      1400,
+      425,
+      40,
+      150
+    ],
+    "score": 0.94
+  },
+  {
+    "class": "capacitor_ceramic",
+    "bbox": [
+      158,
+      438,
+      64,
+      64
+    ],
+    "score": 0.88
+  },
+  {
+    "class": "capacitor_ceramic",
+    "bbox": [
+      298,
+      448,
+      64,
+      64
+    ],
+    "score": 0.9
+  },
+  {
+    "class": "capacitor_electrolytic",
+    "bbox": [
+      438,
+      438,
+      64,
+      64
+    ],
+    "score": 0.9
+  },
+  {
+    "class": "capacitor_electrolytic",
+    "bbox": [
+      614,
+      434,
+      92,
+      92
+    ],
+    "score": 0.96
+  },
+  {
+    "class": "ic_dip",
+    "bbox": [
+      865,
+      380,
+      70,
+      200
+    ],
+    "score": 0.96
+  },
+  {
+    "class": "pin_header",
+    "bbox": [
+      1060,
+      454,
+      240,
+      52
+    ],
+    "score": 0.88
+  },
+  {
+    "class": "diode_axial",
+    "bbox": [
+      190,
+      741,
+      140,
+      38
+    ],
+    "score": 0.88
+  },
+  {
+    "class": "capacitor_electrolytic",
+    "bbox": [
+      514,
+      724,
+      92,
+      92
+    ],
+    "score": 0.9
+  },
+  {
+    "class": "ic_dip",
+    "bbox": [
+      730,
+      735,
+      200,
+      70
+    ],
+    "score": 0.85
+  },
+  {
+    "class": "pin_header",
+    "bbox": [
+      1204,
+      660,
+      52,
+      240
+    ],
+    "score": 0.89
+  }
+]

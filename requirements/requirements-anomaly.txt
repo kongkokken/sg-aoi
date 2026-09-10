@@ -1,0 +1,14 @@
+# Branch B: anomaly detection (Intel anomalib, PatchCore)
+# Create a dedicated env, e.g.: conda create -n aoi-anomaly python=3.10 -y
+#
+# anomalib pulls in PyTorch and Lightning itself. If you need a specific CUDA
+# build of torch, install it from https://pytorch.org FIRST, then anomalib.
+#
+# Pin to a known-good line; the Python API changed between v1.x and v2.x
+# (src/train_anomaly.py notes the differences).
+
+anomalib>=1.1,<3
+torch>=2.0
+opencv-python>=4.8
+openvino>=2024.0   # optional but recommended: exported OpenVINO inference
+PyYAML>=6.0

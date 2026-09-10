@@ -1,0 +1,19 @@
+# Decision engine + operator UI (inference-time glue)
+# Create a dedicated env, e.g.: conda create -n aoi-app python=3.10 -y
+#
+# If you want to run BOTH branches inside this env, also install
+# paddlepaddle[-gpu] and anomalib here. The intended scaled-down setup is:
+#   - Branch A model exported with PaddleDetection (deploy format) and run via
+#     paddle.inference here, or detection results imported from a JSON file.
+#   - Branch B model exported to OpenVINO/ONNX and run via anomalib inferencers.
+
+streamlit>=1.32
+pillow>=10.0
+opencv-python>=4.8
+numpy>=1.24
+PyYAML>=6.0
+# Uncomment when running detection inference inside this env:
+# paddlepaddle>=2.6
+# Uncomment when running the anomaly model inside this env:
+# anomalib>=1.1,<3
+# openvino>=2024.0
