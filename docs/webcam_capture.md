@@ -61,6 +61,11 @@ data/raw/captures/2026-09-10_153012/
 `session_log.json` is the manifest for later debug/dataset tooling — read it
 rather than globbing the folder.
 
+> 💡 Captured sessions can be marked OK/NG directly in the app: open the
+> **Labeling** page → "Import webcam captures" → pick the session (labeled
+> copies land in `data/boards_ok` / `data/boards_ng`, ledger in
+> `data/labels.jsonl`).
+
 ## Using the captures for pipeline debugging
 
 Point the laptop camera at a board (or a printed board photo) on the desk,

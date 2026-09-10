@@ -1,11 +1,12 @@
 """PCBA AOI operator UI (Streamlit) — implements docs/ui_design.md.
 
-Five pages (sidebar navigation):
+Six pages (sidebar navigation):
   1. Inspection        — capture/upload -> align (optional) -> pipeline -> verdict
   2. Review History    — past verdicts, filters, false-reject/false-accept marks
   3. Settings          — threshold sliders/toggles over configs/pipeline.yaml
-  4. Dataset & Training— image counts, golden board, model file status
-  5. Setup Wizard      — live checklist from filesystem state vs. README roadmap
+  4. Labeling          — mark images OK/NG into boards_ok/boards_ng + labels.jsonl
+  5. Dataset & Training— image counts, golden board, model file status
+  6. Setup Wizard      — live checklist from filesystem state vs. README roadmap
 
 Design rules honored here:
 * All heavy imports (cv2, yaml, the pipeline module) are lazy inside functions
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 from dataclasses import asdict
@@ -178,6 +180,141 @@ def _defect_rows(defects: list[Any]) -> list[dict[str, Any]]:
         }
         for d in defects
     ]
+
+
+# ---------------------------------------------------------------------------
+# Labeling helpers — pure filesystem/ledger operations. They take explicit
+# paths and never touch `st`, so they can be exercised headlessly (tests,
+# scripts) without a running Streamlit context. Only `page_labeling` calls
+# them from the UI.
+# ---------------------------------------------------------------------------
+
+LABEL_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
+
+
+def _labels_ledger_path(data_root: Path) -> Path:
+    return data_root / "labels.jsonl"
+
+
+def _append_label_ledger(record: dict[str, Any], ledger_path: Path) -> Path:
+    """Append one JSON line to the label ledger. History is never rewritten."""
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {"timestamp": datetime.now().isoformat(timespec="seconds"), **record}
+    with ledger_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+    return ledger_path
+
+
+def _label_target_dir(label: str, data_root: Path) -> Path:
+    return data_root / ("boards_ok" if label == "OK" else "boards_ng")
+
+
+def _collision_safe_name(dest_dir: Path, name: str) -> str:
+    """A filename that does not yet exist in dest_dir (name, name_2, ...)."""
+    stem, suffix = Path(name).stem, Path(name).suffix
+    candidate, n = name, 2
+    while (dest_dir / candidate).exists():
+        candidate = f"{stem}_{n}{suffix}"
+        n += 1
+    return candidate
+
+
+def _sanitize_tag(text: str) -> str:
+    """Filesystem-safe session tag for filename prefixes."""
+    tag = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in text)
+    return tag.strip("_") or "session"
+
+
+def save_uploaded_images(files: list[Any], data_root: Path) -> Path:
+    """Persist st.file_uploader files into data/raw/uploads/<timestamped-session>/.
+
+    Returns the session directory; raw uploads stay untouched by labeling.
+    """
+    session_dir = data_root / "raw" / "uploads" / datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    session_dir.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        name = _collision_safe_name(session_dir, Path(f.name).name)
+        (session_dir / name).write_bytes(f.getbuffer())
+    return session_dir
+
+
+def label_image(src_path: Path, label: str, data_root: Path, session_tag: str = "") -> Path:
+    """COPY (not move) an image into boards_ok/boards_ng and append a ledger line."""
+    src_path = Path(src_path)
+    dest_dir = _label_target_dir(label, data_root)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    prefix = f"{_sanitize_tag(session_tag)}_" if session_tag else ""
+    dest = dest_dir / _collision_safe_name(dest_dir, prefix + src_path.name)
+    shutil.copy2(src_path, dest)
+    _append_label_ledger(
+        {"action": "label", "source_path": str(src_path),
+         "saved_path": str(dest), "label": label},
+        _labels_ledger_path(data_root),
+    )
+    return dest
+
+
+def relabel_image(saved_path: Path, new_label: str, data_root: Path,
+                  source_path: str = "") -> Path:
+    """Move a labeled image between boards_ok/boards_ng; append a correction line."""
+    saved_path = Path(saved_path)
+    dest_dir = _label_target_dir(new_label, data_root)
+    if saved_path.parent.resolve() == dest_dir.resolve():
+        return saved_path  # already in the right folder — nothing to do
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / _collision_safe_name(dest_dir, saved_path.name)
+    shutil.move(str(saved_path), str(dest))
+    _append_label_ledger(
+        {"action": "relabel", "source_path": source_path,
+         "saved_path_from": str(saved_path), "saved_path_to": str(dest),
+         "label": new_label},
+        _labels_ledger_path(data_root),
+    )
+    return dest
+
+
+def load_label_state(ledger_path: Path, source_paths: list[str]) -> dict[str, dict[str, str]]:
+    """Reconstruct {source_path: {label, saved_path}} for a working set from the
+    ledger, applying relabel corrections in order."""
+    sources = {str(p) for p in source_paths}
+    state: dict[str, dict[str, str]] = {}
+    if not Path(ledger_path).is_file():
+        return state
+    for line in Path(ledger_path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # skip corrupt lines, keep browsing
+        sp = rec.get("source_path", "")
+        if rec.get("action") == "label" and sp in sources:
+            state[sp] = {"label": rec.get("label", ""),
+                         "saved_path": rec.get("saved_path", "")}
+        elif rec.get("action") == "relabel" and sp in state:
+            state[sp] = {"label": rec.get("label", ""),
+                         "saved_path": rec.get("saved_path_to", "")}
+    return state
+
+
+def build_dataset_zip(data_root: Path) -> bytes:
+    """Zip boards_ok/ + boards_ng/ + labels.jsonl into an in-memory archive."""
+    import io  # noqa: PLC0415
+    import zipfile  # noqa: PLC0415
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for folder in ("boards_ok", "boards_ng"):
+            base = data_root / folder
+            if base.is_dir():
+                for p in sorted(base.rglob("*")):
+                    if p.is_file() and p.name != ".gitkeep":
+                        zf.write(p, f"{folder}/{p.relative_to(base).as_posix()}")
+        ledger = _labels_ledger_path(data_root)
+        if ledger.is_file():
+            zf.write(ledger, "labels.jsonl")
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +738,224 @@ def page_settings(config_path: Path, cfg: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Page 4: Dataset & Training
+# Page 4: Labeling
+# ---------------------------------------------------------------------------
+
+def _inject_labeling_css() -> None:
+    """Page-local color for the two primary labeling buttons (ui_design.md §4:
+    green #22c55e OK / red #ef4444 NG). Uses :has() marker spans so ONLY the
+    OK/NG buttons on this page are recolored; icons + text still carry the
+    meaning if a browser ignores the CSS."""
+    st.markdown(
+        "<style>"
+        ".stElementContainer:has(.aoi-ok-btn) + .stElementContainer button{"
+        f"background-color:{COLOR_OK};border-color:{COLOR_OK};color:#fff;"
+        "height:56px;font-size:20px;font-weight:700;}"
+        ".stElementContainer:has(.aoi-ng-btn) + .stElementContainer button{"
+        f"background-color:{COLOR_NG};border-color:{COLOR_NG};color:#fff;"
+        "height:56px;font-size:20px;font-weight:700;}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+
+
+def _session_images(session_dir: Path) -> list[Path]:
+    return sorted(p for p in session_dir.iterdir()
+                  if p.is_file() and p.suffix.lower() in LABEL_EXTENSIONS)
+
+
+def _labeling_start(paths: list[Path], origin: str) -> None:
+    st.session_state["label_set"] = [str(p) for p in paths]
+    st.session_state["label_origin"] = origin
+    st.session_state["label_idx"] = 0
+
+
+def _next_unlabeled(paths: list[str], labels: dict[str, Any], after: int) -> int:
+    """First unlabeled index after `after`, wrapping; len(paths) when all done."""
+    for j in range(after + 1, len(paths)):
+        if paths[j] not in labels:
+            return j
+    for j in range(0, after + 1):
+        if paths[j] not in labels:
+            return j
+    return len(paths)
+
+
+def page_labeling() -> None:
+    st.header("Labeling — mark boards OK / NG")
+    st.caption(
+        "First step of training the model: build the `boards_ok` / `boards_ng` "
+        "dataset one image at a time. Labeled images are **copied** into "
+        "`data/boards_ok` / `data/boards_ng` — the raw session stays untouched."
+    )
+
+    data_root = PROJECT_ROOT / "data"
+    ledger_path = _labels_ledger_path(data_root)
+    _inject_labeling_css()
+
+    # --- image source -----------------------------------------------------------
+    source = st.radio(
+        "Image source", ["Upload images", "Import webcam captures"],
+        horizontal=True, key="labeling_source",
+    )
+
+    if source == "Upload images":
+        uploads = st.file_uploader(
+            "Upload board images (jpg / jpeg / png / bmp)",
+            type=sorted(e.lstrip(".") for e in LABEL_EXTENSIONS),
+            accept_multiple_files=True,
+        )
+        if uploads:
+            st.caption(f"{len(uploads)} file(s) selected — saved under "
+                       "`data/raw/uploads/` when you start.")
+            if st.button("📥 Save & start labeling", use_container_width=True):
+                session_dir = save_uploaded_images(uploads, data_root)
+                _labeling_start(_session_images(session_dir), session_dir.name)
+                st.rerun()
+        else:
+            st.info("No images yet — upload a batch of board photos to start labeling.")
+    else:
+        captures_root = data_root / "raw" / "captures"
+        sessions = []
+        if captures_root.is_dir():
+            sessions = [d for d in sorted(captures_root.iterdir(), reverse=True)
+                        if d.is_dir() and _session_images(d)]
+        if not sessions:
+            st.info(
+                "No webcam capture sessions yet — run "
+                "`scripts/capture_webcam.py` first (see docs/webcam_capture.md), "
+                "then pick the session here."
+            )
+        else:
+            pick = st.selectbox(
+                "Capture session", sessions,
+                format_func=lambda d: f"{d.name} ({len(_session_images(d))} shots)",
+            )
+            if st.button("📥 Import session & start labeling", use_container_width=True):
+                _labeling_start(_session_images(pick), pick.name)
+                st.rerun()
+
+    st.divider()
+
+    # --- working set --------------------------------------------------------------
+    paths: list[str] = st.session_state.get("label_set", [])
+    if not paths:
+        st.caption("Pick a source above to start a labeling session.")
+    else:
+        origin = st.session_state.get("label_origin", "")
+        labels = load_label_state(ledger_path, paths)
+        n_ok = sum(1 for v in labels.values() if v["label"] == "OK")
+        n_ng = sum(1 for v in labels.values() if v["label"] == "NG")
+        remaining = len(paths) - len(labels)
+
+        cols = st.columns(5)
+        cols[0].metric("✅ OK (this set)", n_ok)
+        cols[1].metric("❌ NG (this set)", n_ng)
+        cols[2].metric("Remaining", remaining)
+        cols[3].metric("boards_ok total", _count_images(data_root / "boards_ok"))
+        cols[4].metric("boards_ng total", _count_images(data_root / "boards_ng"))
+        st.progress(len(labels) / len(paths) if paths else 0.0,
+                    text=f"{len(labels)} / {len(paths)} labeled — source: {origin}")
+
+        idx = min(st.session_state.get("label_idx", 0), len(paths))
+
+        def _apply_label(label: str) -> None:
+            """Label or relabel the current image, then auto-advance."""
+            src = Path(paths[idx])
+            existing = labels.get(paths[idx])
+            if existing and existing["label"] == label:
+                pass  # same label again — just move on
+            elif existing:  # relabel via the big buttons
+                relabel_image(Path(existing["saved_path"]), label, data_root,
+                              source_path=paths[idx])
+            else:
+                label_image(src, label, data_root, session_tag=origin)
+            fresh = load_label_state(ledger_path, paths)
+            st.session_state["label_idx"] = _next_unlabeled(paths, fresh, idx)
+
+        if idx >= len(paths):
+            st.success(f"🎉 All {len(paths)} images in this set are labeled "
+                       f"({n_ok} OK / {n_ng} NG). Load another source above, "
+                       "or fix labels in the review section below.")
+            if st.button("← Back to last image"):
+                st.session_state["label_idx"] = len(paths) - 1
+                st.rerun()
+        else:
+            current = Path(paths[idx])
+            already = labels.get(paths[idx])
+            badge = f" — currently labeled **{already['label']}**" if already else ""
+            st.subheader(f"Image {idx + 1} of {len(paths)} — `{current.name}`{badge}")
+            st.image(str(current), use_container_width=True)
+
+            col_ok, col_ng, col_skip, col_back = st.columns([3, 3, 1, 1])
+            with col_ok:
+                st.markdown('<span class="aoi-ok-btn"></span>', unsafe_allow_html=True)
+                if st.button("✅ OK", use_container_width=True):
+                    _apply_label("OK")
+                    st.rerun()
+            with col_ng:
+                st.markdown('<span class="aoi-ng-btn"></span>', unsafe_allow_html=True)
+                if st.button("❌ NG", use_container_width=True):
+                    _apply_label("NG")
+                    st.rerun()
+            with col_skip:
+                if st.button("Skip →", use_container_width=True):
+                    st.session_state["label_idx"] = (idx + 1) % len(paths)
+                    st.rerun()
+            with col_back:
+                if st.button("← Back", use_container_width=True, disabled=idx == 0):
+                    st.session_state["label_idx"] = idx - 1
+                    st.rerun()
+
+        # --- review & fix -------------------------------------------------------------
+        labels = load_label_state(ledger_path, paths)  # refresh after any action
+        with st.expander(f"Review & fix — {len(labels)} labeled in this set"):
+            if not labels:
+                st.caption("Nothing labeled yet in this working set.")
+            for i, sp in enumerate(paths):
+                entry = labels.get(sp)
+                if not entry:
+                    continue
+                saved = Path(entry["saved_path"])
+                col_img, col_name, col_fix = st.columns([1, 3, 2])
+                with col_img:
+                    if saved.is_file():
+                        st.image(str(saved), width=96)
+                    else:
+                        st.caption("file missing")
+                with col_name:
+                    st.markdown(f"`{Path(sp).name}` → **{entry['label']}**")
+                    st.caption(saved.name)
+                with col_fix:
+                    choice = st.selectbox(
+                        "Change label", ["OK", "NG"],
+                        index=0 if entry["label"] == "OK" else 1,
+                        key=f"relabel_{i}", label_visibility="collapsed",
+                    )
+                    if choice != entry["label"]:
+                        if saved.is_file():
+                            relabel_image(saved, choice, data_root, source_path=sp)
+                            st.rerun()
+                        else:
+                            st.warning("Saved file not found — cannot move it.")
+
+    # --- export ---------------------------------------------------------------------
+    st.subheader("Export")
+    st.download_button(
+        "⬇ Download labeled dataset (.zip)",
+        data=build_dataset_zip(data_root),
+        file_name=f"pcba_aoi_labeled_dataset_{datetime.now():%Y%m%d_%H%M%S}.zip",
+        mime="application/zip",
+        use_container_width=True,
+    )
+    st.caption(
+        "Streamlit Cloud's filesystem is ephemeral — anything labeled there is "
+        "lost on restart/redeploy, so download the labeled dataset before you leave."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Page 5: Dataset & Training
 # ---------------------------------------------------------------------------
 
 def page_dataset(cfg: dict[str, Any]) -> None:
@@ -681,7 +1035,7 @@ def page_dataset(cfg: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Page 5: Setup Wizard
+# Page 6: Setup Wizard
 # ---------------------------------------------------------------------------
 
 def page_wizard(cfg: dict[str, Any]) -> None:
@@ -771,7 +1125,8 @@ def main() -> None:
     st.sidebar.header("Navigation")
     page = st.sidebar.radio(
         "Page",
-        ["Inspection", "Review History", "Settings", "Dataset & Training", "Setup Wizard"],
+        ["Inspection", "Review History", "Settings", "Labeling",
+         "Dataset & Training", "Setup Wizard"],
         label_visibility="collapsed",
     )
     st.sidebar.divider()
@@ -796,6 +1151,8 @@ def main() -> None:
         page_history(cfg)
     elif page == "Settings":
         page_settings(config_path, cfg)
+    elif page == "Labeling":
+        page_labeling()
     elif page == "Dataset & Training":
         page_dataset(cfg)
     else:

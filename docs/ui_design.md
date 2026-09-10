@@ -284,3 +284,33 @@ audible NG alert (browser autoplay policy), live camera stream (Streamlit
 offers snapshot input only), true i18n, and comment preservation when the
 Settings page rewrites `pipeline.yaml` (yaml round-trip drops comments — the
 canonical commented copy should be kept in version control).
+
+---
+
+## 8. Labeling workflow (OK/NG)
+
+The **Labeling** page (sidebar, between Settings and Dataset & Training) is the
+dataset-building entry point — the first step of the train-the-model workflow.
+
+- **Sources**: upload a batch of images (saved to `data/raw/uploads/<session>/`)
+  or import a webcam capture session from `data/raw/captures/*/` (see
+  `docs/webcam_capture.md`).
+- **Workflow**: one large image at a time ("3 of 12"), two big buttons —
+  **✅ OK** (green `#22c55e`) and **❌ NG** (red `#ef4444`) — plus **Skip** and
+  **Back** for relabeling the previous image. Labeling **copies** the image
+  into `data/boards_ok/` / `data/boards_ng/` (collision-safe, session-prefixed
+  filenames); raw captures stay untouched.
+- **Ledger**: every action appends one JSON line to `data/labels.jsonl`
+  (`timestamp`, `action` = label/relabel, `source_path`, `saved_path`,
+  `label`). Corrections are appended as new lines — history is never rewritten.
+- **Review & fix**: expander lists everything labeled in the current working
+  set; a per-row dropdown moves the file between `boards_ok`/`boards_ng` and
+  appends a `relabel` record.
+- **Progress**: bar + counters (OK/NG/remaining in the set, plus running totals
+  in `boards_ok`/`boards_ng` via the same `_count_images` helper the Dataset &
+  Training page uses, so both pages always agree).
+- **Export**: "Download labeled dataset (.zip)" bundles `boards_ok/` +
+  `boards_ng/` + `labels.jsonl`. Required on Streamlit Cloud, whose filesystem
+  is ephemeral — a caption on the page says exactly that.
+- Labeling is a real feature and works identically in demo mode; the demo
+  banner logic is untouched.

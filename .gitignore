@@ -9,6 +9,13 @@ __pycache__/
 # --- Large / regenerable data (keep the demo + golden assets!) ---------------
 # Raw webcam capture sessions (large, local-only).
 data/raw/captures/
+# Labeling-page uploads and output (runtime data; pull the zip export instead).
+data/raw/uploads/
+data/labels.jsonl
+data/boards_ok/*
+data/boards_ng/*
+!data/boards_ok/.gitkeep
+!data/boards_ng/.gitkeep
 # Detection training dataset images (large; keep the annotation scaffolding).
 data/detection_dataset/images/train/*
 data/detection_dataset/images/val/*
