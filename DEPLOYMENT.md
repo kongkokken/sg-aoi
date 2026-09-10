@@ -42,9 +42,15 @@ Best when viewers should open the link on their own devices over several days.
    - **Repository:** `<YOUR-USERNAME>/pcba-aoi`
    - **Branch:** `main`
    - **Main file path:** `src/app.py`
-4. Click **Advanced settings…** and add this environment variable so the app
-   boots on the demo config (also fine to skip — demo mode auto-activates
-   either way; this just makes the Settings page edit the demo config):
+4. Click **Advanced settings…** and:
+   - **Python version:** select **3.13** (do NOT leave it on the newest
+     default — very new Pythons like 3.14 may lack prebuilt wheels for some
+     packages, forcing slow source builds that fail; seen in practice with
+     `pillow==11.0.0` / Python 3.14: "headers or library files could not be
+     found for zlib").
+   - Add this environment variable so the app boots on the demo config (also
+     fine to skip — demo mode auto-activates either way; this just makes the
+     Settings page edit the demo config):
 
    ```
    AOI_CONFIG=configs/pipeline.demo.yaml
@@ -54,6 +60,18 @@ Best when viewers should open the link on their own devices over several days.
    **App → Settings → Secrets** as `AOI_CONFIG = "configs/pipeline.demo.yaml"`.)
 5. Click **Deploy**. First build takes ~2–4 minutes while it installs
    `requirements.txt`.
+
+### Troubleshooting
+
+- **Deploy "stuck" 10+ minutes on `Processing dependencies…`, or the log
+  shows `Failed to download and build pillow` / `RequiredDependencyException:
+  zlib`:** the app is building on a Python that is too new for the pinned
+  packages (the build has already failed — it will not recover). Fix: this
+  repo's `requirements.txt` uses minimum-version floors instead of hard pins;
+  pull the latest commit, then in Streamlit Cloud either delete the app and
+  redeploy with **Python 3.13** (Advanced settings), or **App → Settings →
+  Reboot** after the fix is pushed. A healthy build finishes dependency
+  install in ~1–3 minutes and ends with the app URL going live.
 
 ### Good to know
 
