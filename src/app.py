@@ -1,12 +1,16 @@
-"""PCBA AOI operator UI (Streamlit) — implements docs/ui_design.md.
+"""SG-AOI operator UI (Streamlit) — implements docs/ui_design.md + Phase A
+professional UI (docs/ui_proposal_sg_aoi.md §9, Season Group branding).
 
-Six pages (sidebar navigation):
-  1. Inspection        — capture/upload -> align (optional) -> pipeline -> verdict
-  2. Review History    — past verdicts, filters, false-reject/false-accept marks
-  3. Settings          — threshold sliders/toggles over configs/pipeline.yaml
-  4. Labeling          — mark images OK/NG into boards_ok/boards_ng + labels.jsonl
-  5. Dataset & Training— image counts, golden board, model file status
-  6. Setup Wizard      — live checklist from filesystem state vs. README roadmap
+Ten pages in a sectioned, role-filtered sidebar navigation:
+  RUN:            Inspection, Review & Repair (was "Review History")
+  MONITOR:        Dashboard (FPY / Pareto / NG feed / station status), SPC
+  BUILD:          Labeling, Dataset & Training
+  ADMINISTRATION: Audit Trail, Settings
+  MAINTENANCE:    System Check
+  (last)          Setup Wizard
+
+Role simulation (no authentication — demo only): Operator sees RUN,
+Engineer sees RUN+MONITOR+BUILD, Admin sees everything; Setup Wizard always.
 
 Design rules honored here:
 * All heavy imports (cv2, yaml, the pipeline module) are lazy inside functions
@@ -28,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -58,6 +63,31 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 COLOR_OK = "#22c55e"
 COLOR_NG = "#ef4444"
 COLOR_WARN = "#f59e0b"
+
+# --- Season Group brand chrome (ui_proposal_sg_aoi.md §2/§8) -----------------
+# Brand colors are for chrome only (sidebar, accents); verdict semantics stay
+# on the industry-standard green/red/amber above.
+SG_CORAL = "#FB6362"
+SG_SURFACE = "#343741"
+BRAND_DIR = PROJECT_ROOT / "brand"
+LOGO_LIGHT = BRAND_DIR / "logo.webp"  # white variant — for the dark UI
+LINE_NAME = "Season Group · PCBA Line 1"
+
+# --- Sectioned navigation + role simulation (demo only, no authentication) ---
+NAV_SECTIONS: list[tuple[str, list[str]]] = [
+    ("RUN", ["Inspection", "Review & Repair"]),
+    ("MONITOR", ["Dashboard", "SPC"]),
+    ("BUILD", ["Labeling", "Dataset & Training"]),
+    ("ADMINISTRATION", ["Audit Trail", "Settings"]),
+    ("MAINTENANCE", ["System Check"]),
+]
+SETUP_PAGE = "Setup Wizard"
+ROLES = ["Engineer", "Operator", "Admin"]
+ROLE_SECTIONS = {
+    "Operator": {"RUN"},
+    "Engineer": {"RUN", "MONITOR", "BUILD"},
+    "Admin": {name for name, _ in NAV_SECTIONS},
+}
 
 # Placeholder only — no translation tables yet (see module docstring TODO).
 LANGUAGES = {"EN": "English", "中文": "Chinese (placeholder)"}
@@ -156,6 +186,283 @@ def _results_dir(cfg: dict[str, Any]) -> Path:
     return _resolve(cfg.get("output", {}).get("results_dir", "results")) or (
         PROJECT_ROOT / "results"
     )
+
+
+def _results_writable(results_dir: Path) -> tuple[bool, str]:
+    """Write+delete a probe file; returns (ok, error-message)."""
+    try:
+        results_dir.mkdir(parents=True, exist_ok=True)
+        probe = results_dir / ".write_probe_tmp"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True, ""
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
+def _inject_brand_css() -> None:
+    """Season Group chrome: Noto Sans, coral sidebar section labels, metric
+    cards. Verdict colors are NOT touched — they stay per docs/ui_design.md."""
+    st.markdown(
+        "<style>"
+        "@import url('https://fonts.googleapis.com/css2?family=Noto+Sans:"
+        "wght@400;600;700;800&display=swap');"
+        "html, body, .stApp, [class*='css'] {"
+        "font-family:'Noto Sans',-apple-system,'Segoe UI',Roboto,sans-serif;}"
+        f".sg-section-label{{color:{SG_CORAL};font-size:11px;font-weight:700;"
+        "letter-spacing:2px;text-transform:uppercase;margin:14px 0 2px 0;"
+        "opacity:0.9;}"
+        "[data-testid='stMetric']{"
+        f"background-color:{SG_SURFACE};border:1px solid rgba(255,255,255,0.10);"
+        "border-radius:12px;padding:12px 16px;}"
+        "hr{border-color:rgba(255,255,255,0.10);}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Analytics helpers — pure functions over results/ + data/ (no st.*), so they
+# can be exercised headlessly. Verdict JSONs carry no timestamp field; the
+# file mtime is the inspection time (same convention as Review & Repair).
+# ---------------------------------------------------------------------------
+
+def _load_verdict_records(results_dir: Path) -> list[dict[str, Any]]:
+    """All *_verdict.json files as records sorted by inspection time (mtime)."""
+    records: list[dict[str, Any]] = []
+    if not results_dir.is_dir():
+        return records
+    for vf in sorted(results_dir.glob("*_verdict.json")):
+        try:
+            data = json.loads(vf.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - skip corrupt records, keep going
+            continue
+        records.append({
+            "file": vf,
+            "time": datetime.fromtimestamp(vf.stat().st_mtime),
+            "board_id": data.get("board_id", vf.stem.replace("_verdict", "")),
+            "verdict": data.get("verdict", "?"),
+            "defects": data.get("defects", []) or [],
+        })
+    records.sort(key=lambda r: r["time"])
+    return records
+
+
+def _daily_fpy(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per calendar day: boards / ok / ng / FPY %."""
+    days: dict[str, dict[str, Any]] = {}
+    for r in records:
+        key = r["time"].strftime("%Y-%m-%d")
+        d = days.setdefault(key, {"date": key, "boards": 0, "ok": 0, "ng": 0})
+        d["boards"] += 1
+        if r["verdict"] == "OK":
+            d["ok"] += 1
+        elif r["verdict"] == "NG":
+            d["ng"] += 1
+    rows = [days[k] for k in sorted(days)]
+    for d in rows:
+        d["fpy"] = round(100.0 * d["ok"] / d["boards"], 1) if d["boards"] else 0.0
+    return rows
+
+
+# Reference designators look like R7, C3, U12 — extracted from defect detail
+# text (e.g. "Expected R7 (resistor_axial) not detected.").
+_DESIGNATOR_RE = re.compile(r"\b[A-Z]{1,3}\d+\b")
+
+
+def _extract_designator(detail: str) -> str | None:
+    m = _DESIGNATOR_RE.search(detail or "")
+    return m.group(0) if m else None
+
+
+def _defect_pareto(records: list[dict[str, Any]],
+                   by_designator: bool = False) -> list[dict[str, Any]]:
+    """Defect counts sorted desc; label is the type, or 'type — designator'."""
+    counts: dict[str, int] = {}
+    for r in records:
+        for d in r["defects"]:
+            dtype = d.get("type", "?")
+            if by_designator:
+                des = _extract_designator(d.get("detail", ""))
+                label = f"{dtype} — {des}" if des else dtype
+            else:
+                label = dtype
+            counts[label] = counts.get(label, 0) + 1
+    return [{"defect": k, "count": v}
+            for k, v in sorted(counts.items(), key=lambda kv: -kv[1])]
+
+
+def _pchart(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Daily NG proportion with p-chart center line and 3-sigma limits.
+
+    p_i = NG boards / boards that day; p̄ = total NG / total boards;
+    UCL/LCL = p̄ ± 3·sqrt(p̄(1−p̄)/n), n = boards that day (LCL clamped ≥ 0).
+    """
+    import math  # noqa: PLC0415
+
+    days = _daily_fpy(records)
+    total = sum(d["boards"] for d in days)
+    total_ng = sum(d["ng"] for d in days)
+    p_bar = total_ng / total if total else 0.0
+    out: dict[str, Any] = {"dates": [], "p": [], "cl": [], "ucl": [], "lcl": [],
+                           "n": [], "p_bar": p_bar}
+    for d in days:
+        n = d["boards"]
+        sigma = math.sqrt(p_bar * (1 - p_bar) / n) if n else 0.0
+        out["dates"].append(d["date"])
+        out["n"].append(n)
+        out["p"].append(d["ng"] / n if n else 0.0)
+        out["cl"].append(p_bar)
+        out["ucl"].append(min(1.0, p_bar + 3 * sigma))
+        out["lcl"].append(max(0.0, p_bar - 3 * sigma))
+    return out
+
+
+def collect_system_checks(cfg: dict[str, Any] | None,
+                          config_path: Path) -> list[dict[str, Any]]:
+    """One-click self-diagnosis rows — pure filesystem checks, no st.* calls.
+
+    Each row: {check, ok, detail, fix} where fix is a one-line "what to do if
+    red" hint. Shares its logic with the Setup Wizard where both compute the
+    same thing (golden image, expected components, model status).
+    """
+    rows: list[dict[str, Any]] = []
+
+    def add(check: str, ok: bool, detail: str, fix: str) -> None:
+        rows.append({"check": check, "ok": bool(ok), "detail": detail, "fix": fix})
+
+    # 1. config parses
+    eff_cfg: dict[str, Any] = cfg or {}
+    try:
+        import yaml  # noqa: PLC0415
+
+        parsed = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        if not eff_cfg and isinstance(parsed, dict):
+            eff_cfg = parsed
+        add("Pipeline config parses", isinstance(parsed, dict),
+            f"{config_path.name} loaded",
+            "Fix the YAML syntax in configs/pipeline.yaml.")
+    except Exception as exc:  # noqa: BLE001
+        add("Pipeline config parses", False, f"{config_path.name}: {exc}",
+            "Fix the YAML syntax in configs/pipeline.yaml.")
+
+    # 2. golden image exists
+    golden_img = _resolve(
+        eff_cfg.get("golden", {}).get("image", "data/golden/golden_board.jpg"))
+    add("Golden board image exists", bool(golden_img and golden_img.is_file()),
+        str(golden_img),
+        "Capture one known-good board into data/golden/ "
+        "(see docs/data_collection_guide.md).")
+
+    # 3. expected_components.json parses (count components)
+    exp_path = _resolve(
+        eff_cfg.get("golden", {}).get("expected_components",
+                                      "data/golden/expected_components.json"))
+    n_comp, exp_ok = 0, False
+    if exp_path and exp_path.is_file():
+        try:
+            n_comp = len(json.loads(exp_path.read_text(encoding="utf-8"))
+                         .get("components", []))
+            exp_ok = True
+        except Exception:  # noqa: BLE001
+            exp_ok = False
+    add("expected_components.json parses", exp_ok and n_comp > 0,
+        f"{n_comp} components defined" if exp_ok else "missing or invalid JSON",
+        "Define the expected component list (format in data/README.md).")
+
+    # 4. detection model OR demo precomputed detections
+    status = _model_status(eff_cfg)
+    if _demo_active():
+        add("Detection available", True,
+            "demo mode — scripted detections (no trained model required)",
+            "Train & export the PP-YOLOE+ detector for production use.")
+    else:
+        add("Detection model exported", status["detection_ready"],
+            str(status["detection_path"]),
+            "Run tools/export_model.py in the PaddleDetection repo "
+            "(configs/detection/README.md).")
+
+    # 5. anomaly model — deferred in phase 1, never a failure
+    add("Anomaly model (Branch B)", True,
+        "present" if status["anomaly_ready"] else "deferred (phase 1 — OK)",
+        "Not required in phase 1; train only when Branch B is activated.")
+
+    # 6. results dir writable (write + delete a temp probe file)
+    rdir = _results_dir(eff_cfg)
+    w_ok, w_err = _results_writable(rdir)
+    add("Results directory writable", w_ok, str(rdir) if w_ok else f"{rdir}: {w_err}",
+        "Check folder permissions on results/.")
+
+    # 7. free disk space (warn below 1 GB)
+    try:
+        free_gb = shutil.disk_usage(PROJECT_ROOT).free / (1024 ** 3)
+        add("Free disk space ≥ 1 GB", free_gb >= 1.0, f"{free_gb:.1f} GB free",
+            "Free up disk space on this station.")
+    except Exception as exc:  # noqa: BLE001
+        add("Free disk space ≥ 1 GB", False, str(exc), "Could not read disk usage.")
+
+    # 8. data folders present
+    data_root = PROJECT_ROOT / "data"
+    missing = [name for name in ("boards_ok", "boards_ng", "golden", "raw")
+               if not (data_root / name).is_dir()]
+    add("Data folders present", not missing,
+        "all present" if not missing else "missing: " + ", ".join(missing),
+        "Create the missing folders under data/.")
+
+    # 9. labels ledger line count (informational — never red)
+    ledger = _labels_ledger_path(data_root)
+    if ledger.is_file():
+        n_lines = sum(1 for line in ledger.read_text(encoding="utf-8").splitlines()
+                      if line.strip())
+        add("Labels ledger", True, f"{n_lines} entries in data/labels.jsonl",
+            "Nothing to do.")
+    else:
+        add("Labels ledger", True,
+            "no labels.jsonl yet — normal before the first labeling session",
+            "Nothing to do — the ledger is created by the Labeling page.")
+
+    return rows
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Parse a JSONL ledger, skipping blank/corrupt lines."""
+    if not path.is_file():
+        return []
+    out: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _audit_rows(data_root: Path, results_dir: Path) -> list[dict[str, Any]]:
+    """Merge labels.jsonl + feedback.jsonl into one timeline, newest first."""
+    rows: list[dict[str, Any]] = []
+    for rec in _read_jsonl(_labels_ledger_path(data_root)):
+        target = (rec.get("saved_path") or rec.get("saved_path_to")
+                  or rec.get("source_path", ""))
+        rows.append({
+            "timestamp": rec.get("timestamp", ""),
+            "source": "Labeling",
+            "action": rec.get("action", "label"),
+            "target": Path(target).name if target else "—",
+            "detail": f"label: {rec.get('label', '?')}",
+        })
+    for rec in _read_jsonl(results_dir / "feedback.jsonl"):
+        rows.append({
+            "timestamp": rec.get("timestamp", ""),
+            "source": "Inspection feedback",
+            "action": rec.get("mark", "?"),
+            "target": rec.get("board_id", "—"),
+            "detail": rec.get("reason", "—"),
+        })
+    rows.sort(key=lambda r: r["timestamp"], reverse=True)
+    return rows
 
 
 def _verdict_banner(verdict: str, subtitle: str, color: str) -> None:
@@ -556,11 +863,11 @@ def _resolved_run_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Page 2: Review History
+# Page 2: Review & Repair (was "Review History")
 # ---------------------------------------------------------------------------
 
 def page_history(cfg: dict[str, Any]) -> None:
-    st.header("Review History")
+    st.header("Review & Repair")
     results_dir = _results_dir(cfg)
     verdict_files = sorted(
         results_dir.glob("*_verdict.json"), key=lambda p: p.stat().st_mtime, reverse=True
@@ -1035,6 +1342,223 @@ def page_dataset(cfg: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Page: Dashboard (MONITOR) — the management landing page
+# ---------------------------------------------------------------------------
+
+def page_dashboard(cfg: dict[str, Any]) -> None:
+    st.header("Dashboard")
+    if _demo_active():
+        st.markdown(
+            f'<span style="background-color:{SG_CORAL};color:#ffffff;'
+            'font-size:12px;font-weight:700;letter-spacing:1px;'
+            'padding:4px 10px;border-radius:999px;">'
+            "DEMO — simulated detections</span>",
+            unsafe_allow_html=True,
+        )
+
+    results_dir = _results_dir(cfg)
+    records = _load_verdict_records(results_dir)
+    if not records:
+        st.info(
+            "No inspections yet — run your first board on the **Inspection** "
+            "page and this dashboard will light up."
+        )
+        return
+
+    import pandas as pd  # noqa: PLC0415 - lazy; streamlit hard-depends on it
+
+    # --- metric strip ---------------------------------------------------------
+    total = len(records)
+    n_ok = sum(1 for r in records if r["verdict"] == "OK")
+    n_ng = sum(1 for r in records if r["verdict"] == "NG")
+    fpy = 100.0 * n_ok / total if total else 0.0
+    last = records[-1]["time"].strftime("%Y-%m-%d %H:%M")
+    cols = st.columns(5)
+    cols[0].metric("Boards inspected", total)
+    cols[1].metric("OK", n_ok)
+    cols[2].metric("NG", n_ng)
+    cols[3].metric("FPY", f"{fpy:.1f}%")
+    cols[4].metric("Last inspection", last)
+
+    # --- FPY trend ------------------------------------------------------------
+    st.subheader("FPY trend (daily)")
+    daily = _daily_fpy(records)
+    fpy_df = pd.DataFrame(daily).set_index("date")[["fpy"]]
+    fpy_df.columns = ["FPY %"]
+    st.line_chart(fpy_df)
+
+    # --- top defects Pareto ---------------------------------------------------
+    st.subheader("Top defects (Pareto)")
+    pareto = _defect_pareto(records, by_designator=True)
+    if pareto:
+        st.bar_chart(pd.DataFrame(pareto).set_index("defect"))
+    else:
+        st.caption("No defects recorded yet — all boards passed.")
+
+    # --- recent NG feed ---------------------------------------------------------
+    st.subheader("Recent NG boards")
+    ngs = [r for r in records if r["verdict"] == "NG"][-5:][::-1]
+    if not ngs:
+        st.caption("No NG boards — nothing to review. 🎉")
+    for r in ngs:
+        col_img, col_txt = st.columns([1, 3])
+        with col_img:
+            annotated = results_dir / f"{r['board_id']}_annotated.jpg"
+            if annotated.is_file():
+                st.image(str(annotated), use_container_width=True)
+            else:
+                st.caption("no annotated image stored")
+        with col_txt:
+            st.markdown(f"**{r['board_id']}** — {r['time']:%Y-%m-%d %H:%M}")
+            for d in r["defects"]:
+                st.markdown(f"- `{d.get('type', '?')}` — {d.get('detail', '')}")
+
+    # --- station status ---------------------------------------------------------
+    st.subheader("Station status")
+    status = _model_status(cfg)
+    w_ok, _ = _results_writable(results_dir)
+    st.dataframe(
+        [
+            {"item": "Pipeline config", "status": "✅ loaded"},
+            {"item": "Demo mode",
+             "status": "🧪 ON — simulated detections" if _demo_active() else "off"},
+            {"item": "Detection model",
+             "status": ("✅ ready" if status["detection_ready"]
+                        else "❌ not exported")},
+            {"item": "Anomaly model (Branch B)",
+             "status": ("✅ present" if status["anomaly_ready"]
+                        else "⏸ deferred (phase 1 — OK)")},
+            {"item": "Results directory",
+             "status": "✅ writable" if w_ok else "❌ not writable"},
+        ],
+        use_container_width=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Page: SPC (MONITOR) — statistical process control
+# ---------------------------------------------------------------------------
+
+def page_spc(cfg: dict[str, Any]) -> None:
+    st.header("SPC — Statistical Process Control")
+
+    results_dir = _results_dir(cfg)
+    records = _load_verdict_records(results_dir)
+    if not records:
+        st.info("No inspection data yet — run boards on the **Inspection** page first.")
+        return
+
+    import pandas as pd  # noqa: PLC0415
+
+    # --- date-range filter ------------------------------------------------------
+    min_d = records[0]["time"].date()
+    max_d = records[-1]["time"].date()
+    picked = st.date_input("Date range", value=(min_d, max_d),
+                           min_value=min_d, max_value=max_d)
+    start, end = ((picked[0], picked[1])
+                  if isinstance(picked, tuple) and len(picked) == 2
+                  else (min_d, max_d))
+    filtered = [r for r in records if start <= r["time"].date() <= end]
+    if not filtered:
+        st.warning("No inspections in the selected date range.")
+        return
+
+    # --- FPY trend --------------------------------------------------------------
+    st.subheader("FPY trend (daily)")
+    daily = _daily_fpy(filtered)
+    fpy_df = pd.DataFrame(daily).set_index("date")[["fpy"]]
+    fpy_df.columns = ["FPY %"]
+    st.line_chart(fpy_df)
+
+    # --- defect Pareto: by type AND by designator -------------------------------
+    st.subheader("Defect Pareto")
+    col_t, col_d = st.columns(2)
+    with col_t:
+        st.markdown("**By defect type**")
+        pareto_t = _defect_pareto(filtered)
+        if pareto_t:
+            st.bar_chart(pd.DataFrame(pareto_t).set_index("defect"))
+        else:
+            st.caption("No defects in range.")
+    with col_d:
+        st.markdown("**By type + designator**")
+        pareto_d = _defect_pareto(filtered, by_designator=True)
+        if pareto_d:
+            st.bar_chart(pd.DataFrame(pareto_d).set_index("defect"))
+        else:
+            st.caption("No defects in range.")
+
+    # --- p-chart ------------------------------------------------------------------
+    st.subheader("Defect-rate control chart (p-chart)")
+    pc = _pchart(filtered)
+    chart_df = pd.DataFrame(
+        {"daily NG rate": pc["p"], "center line (p̄)": pc["cl"],
+         "UCL": pc["ucl"], "LCL": pc["lcl"]},
+        index=pc["dates"],
+    )
+    st.line_chart(chart_df)
+    st.caption(
+        f"p̄ = {pc['p_bar']:.3f}. Limits = p̄ ± 3·√(p̄(1−p̄)/n), "
+        f"n = boards that day (daily n here: {pc['n']}). When n is small or "
+        "varies day to day, the limits are approximate — read them as a "
+        "screening aid, not a formal alarm."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Page: System Check (MAINTENANCE) — one-click self-diagnosis
+# ---------------------------------------------------------------------------
+
+def page_system_check(cfg: dict[str, Any], config_path: Path) -> None:
+    st.header("System Check")
+    st.caption(
+        "One-click station self-diagnosis, computed live from the filesystem — "
+        "extends the Setup Wizard checks with runtime health (writable results, "
+        "disk space, ledgers)."
+    )
+    if not st.button("▶ Run checks", type="primary"):
+        st.caption("Press **Run checks** to test the station.")
+        return
+
+    rows = collect_system_checks(cfg, config_path)
+    n_bad = sum(1 for r in rows if not r["ok"])
+    if n_bad == 0:
+        st.success(f"✅ ALL GREEN — {len(rows)} checks passed.")
+    else:
+        st.error(f"❌ ISSUES FOUND — {n_bad} of {len(rows)} checks failed.")
+    st.dataframe(
+        [{"": "✅" if r["ok"] else "❌", "Check": r["check"],
+          "Detail": r["detail"], "If red →": r["fix"]} for r in rows],
+        use_container_width=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Page: Audit Trail (ADMINISTRATION) — read-only human-decision history
+# ---------------------------------------------------------------------------
+
+def page_audit_trail(cfg: dict[str, Any]) -> None:
+    st.header("Audit Trail")
+    st.caption(
+        "Read-only history of human decisions: labeling actions "
+        "(`data/labels.jsonl`) and inspection feedback / NG overrides "
+        "(`results/feedback.jsonl`). Operator identity is not tracked yet — "
+        "Users & Roles is a later phase."
+    )
+    rows = _audit_rows(PROJECT_ROOT / "data", _results_dir(cfg))
+    if not rows:
+        st.info(
+            "No audit entries yet — labeling actions and NG overrides/marks "
+            "will appear here as they happen."
+        )
+        return
+    actions = sorted({r["action"] for r in rows})
+    picked = st.multiselect("Filter by action type", actions, default=actions)
+    st.dataframe([r for r in rows if r["action"] in picked],
+                 use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
 # Page 6: Setup Wizard
 # ---------------------------------------------------------------------------
 
@@ -1119,16 +1643,42 @@ def page_wizard(cfg: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    st.set_page_config(page_title="PCBA AOI", page_icon="🔍", layout="wide")
-    st.title("PCBA AOI — OK / NG inspection")
-
-    st.sidebar.header("Navigation")
-    page = st.sidebar.radio(
-        "Page",
-        ["Inspection", "Review History", "Settings", "Labeling",
-         "Dataset & Training", "Setup Wizard"],
-        label_visibility="collapsed",
+    st.set_page_config(
+        page_title="SG-AOI · Season Group",
+        page_icon=str(LOGO_LIGHT) if LOGO_LIGHT.is_file() else "🔍",
+        layout="wide",
     )
+    _inject_brand_css()
+
+    # --- branded sidebar header -------------------------------------------------
+    if LOGO_LIGHT.is_file():
+        st.sidebar.image(str(LOGO_LIGHT), width=180)
+    st.sidebar.markdown("## SG-AOI")
+    st.sidebar.caption(LINE_NAME)
+    st.sidebar.divider()
+
+    # --- role simulation + sectioned navigation ---------------------------------
+    role = st.sidebar.selectbox(
+        "Role", ROLES,
+        help="Simulated role gating for the demo (no authentication): "
+             "Operator sees RUN only, Engineer adds MONITOR + BUILD, "
+             "Admin sees everything.",
+    )
+    allowed = ROLE_SECTIONS[role]
+    options: list[str] = []
+    for section, pages in NAV_SECTIONS:
+        if section not in allowed:
+            continue
+        st.sidebar.markdown(
+            f'<div class="sg-section-label">{section}</div>',
+            unsafe_allow_html=True,
+        )
+        options.extend(pages)
+    st.sidebar.markdown('<div class="sg-section-label">SETUP</div>',
+                        unsafe_allow_html=True)
+    options.append(SETUP_PAGE)
+    page = st.sidebar.radio("Page", options, label_visibility="collapsed")
+
     st.sidebar.divider()
     # Language toggle placeholder — selection is stored but not applied yet.
     st.sidebar.selectbox("Language / 语言", list(LANGUAGES), key="language",
@@ -1147,14 +1697,22 @@ def main() -> None:
 
     if page == "Inspection":
         page_inspection(cfg)
-    elif page == "Review History":
+    elif page == "Review & Repair":
         page_history(cfg)
-    elif page == "Settings":
-        page_settings(config_path, cfg)
+    elif page == "Dashboard":
+        page_dashboard(cfg)
+    elif page == "SPC":
+        page_spc(cfg)
     elif page == "Labeling":
         page_labeling()
     elif page == "Dataset & Training":
         page_dataset(cfg)
+    elif page == "Audit Trail":
+        page_audit_trail(cfg)
+    elif page == "Settings":
+        page_settings(config_path, cfg)
+    elif page == "System Check":
+        page_system_check(cfg, config_path)
     else:
         page_wizard(cfg)
 

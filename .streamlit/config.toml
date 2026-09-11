@@ -10,10 +10,12 @@ maxUploadSize = 50
 gatherUsageStats = false
 
 [theme]
-# Clean light theme matching the factory HMI look.
-base = "light"
-primaryColor = "#2563eb"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f1f5f9"
-textColor = "#0f172a"
+# Season Group corporate identity (docs/ui_proposal_sg_aoi.md §2):
+# coral primary + charcoal dark base. Verdict colors (green/red/amber) are
+# set in code and intentionally NOT driven by this theme.
+base = "dark"
+primaryColor = "#FB6362"
+backgroundColor = "#1D252D"
+secondaryBackgroundColor = "#343741"
+textColor = "#FFFFFF"
 font = "sans serif"

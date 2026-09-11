@@ -194,23 +194,37 @@ streamlit run src/app.py
 
 ## User interface
 
-The operator UI is a multi-page Streamlit app (`src/app.py`), designed in
-detail in [docs/ui_design.md](docs/ui_design.md) (personas, wireframes,
-interaction flows, visual rules, state handling). Pages:
+The operator UI is a multi-page Streamlit app (`src/app.py`) with Season
+Group branding and a sectioned, role-filtered sidebar (Operator / Engineer /
+Admin simulation). Designed in detail in
+[docs/ui_design.md](docs/ui_design.md) (personas, wireframes, interaction
+flows, visual rules, state handling). Pages:
 
-- **Inspection** — capture/upload → optional alignment → verdict banner
+- **RUN · Inspection** — capture/upload → optional alignment → verdict banner
   (OK green / NG red, readable from a distance), annotated image, defect
   table, NG override with logged reason. Phase 1 shows Branch A findings
   (missing/wrong part) only.
-- **Review History** — filterable past verdicts from `results/`, annotated
-  image drill-down, false-reject/false-accept marking into `feedback.jsonl`.
-- **Settings** — threshold sliders and per-defect-type toggles over
-  `configs/pipeline.yaml`, with plain-language explanations; deferred checks
-  are marked as such.
-- **Dataset & Training** — image counts per data folder, golden board and
-  expected-components status, model file presence, retrain commands.
-- **Setup Wizard** — live checklist computed from the filesystem, mapping
-  1:1 to the roadmap below.
+- **RUN · Review & Repair** — filterable past verdicts from `results/`,
+  annotated image drill-down, false-reject/false-accept marking into
+  `feedback.jsonl`.
+- **MONITOR · Dashboard** — boards inspected / OK / NG / FPY metric strip,
+  daily FPY trend, top-defects Pareto, recent-NG feed with thumbnails,
+  station status.
+- **MONITOR · SPC** — date-range filter, FPY trend, defect Pareto by type and
+  designator, p-chart with center line and UCL/LCL.
+- **BUILD · Labeling** — mark images OK/NG into `boards_ok`/`boards_ng` with
+  a `labels.jsonl` ledger and dataset zip export.
+- **BUILD · Dataset & Training** — image counts per data folder, golden board
+  and expected-components status, model file presence, retrain commands.
+- **ADMINISTRATION · Audit Trail** — read-only merged timeline of labeling
+  actions and inspection feedback.
+- **ADMINISTRATION · Settings** — threshold sliders and per-defect-type
+  toggles over `configs/pipeline.yaml`, with plain-language explanations;
+  deferred checks are marked as such.
+- **MAINTENANCE · System Check** — one-click green/red station
+  self-diagnosis (config, golden files, models, disk, writable results).
+- **Setup Wizard** (last) — live checklist computed from the filesystem,
+  mapping 1:1 to the roadmap below.
 
 The app loads and shows guidance even before any model is trained; missing
 models degrade the verdict explicitly (amber "PARTIAL"/"NOT READY" states),

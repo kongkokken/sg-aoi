@@ -314,3 +314,59 @@ dataset-building entry point — the first step of the train-the-model workflow.
   is ephemeral — a caption on the page says exactly that.
 - Labeling is a real feature and works identically in demo mode; the demo
   banner logic is untouched.
+
+---
+
+## 9. Professional UI (Phase A, implemented 2026-09-11)
+
+Season Group branding + industry-standard AOI information architecture, per
+`docs/ui_proposal_sg_aoi.md` (approved Phase A scope).
+
+**Theme & chrome**
+
+- `.streamlit/config.toml`: dark theme — primary `#FB6362` (SG coral),
+  background `#1D252D` (SG charcoal), secondary background `#343741`,
+  text `#FFFFFF`, sans serif. Verdict colors (`#22c55e` / `#ef4444` /
+  `#f59e0b`) remain code-driven and are intentionally NOT part of the theme.
+- Sidebar header: white logo (`brand/logo.webp`, committed), title "SG-AOI",
+  caption "Season Group · PCBA Line 1", hairline divider; page title
+  "SG-AOI · Season Group" with the logo as favicon.
+- Global CSS injection: Noto Sans (Google Fonts, system fallback), small
+  uppercase letter-spaced coral section labels in the sidebar, card styling
+  for metric containers.
+
+**Navigation — sectioned, role-filtered (simulated, no authentication)**
+
+| Section | Pages | Operator | Engineer | Admin |
+|---|---|---|---|---|
+| RUN | Inspection · Review & Repair (renamed from "Review History") | ✅ | ✅ | ✅ |
+| MONITOR | Dashboard · SPC | — | ✅ | ✅ |
+| BUILD | Labeling · Dataset & Training | — | ✅ | ✅ |
+| ADMINISTRATION | Audit Trail · Settings | — | — | ✅ |
+| MAINTENANCE | System Check | — | — | ✅ |
+| (last) | Setup Wizard | ✅ | ✅ | ✅ |
+
+**New pages**
+
+- **Dashboard** — metric strip (boards inspected / OK / NG / FPY % / last
+  inspection), daily FPY trend, top-defects Pareto (type + designator parsed
+  from defect detail), recent-NG feed with annotated thumbnails, station
+  status card, coral "DEMO — simulated detections" chip in demo mode.
+- **SPC** — date-range filter, FPY trend, defect Pareto by type AND by
+  designator, and a p-chart (daily NG proportion with p̄ center line and
+  UCL/LCL = p̄ ± 3·√(p̄(1−p̄)/n)); a caption notes limits are approximate
+  when daily n is small/variable.
+- **System Check** — one-click green/red checklist: config parses, golden
+  image, expected_components.json (with component count), detection model or
+  demo precomputed, anomaly model (deferred = OK), results dir writable,
+  ≥ 1 GB free disk, data folders, labels ledger line count; ALL GREEN /
+  ISSUES FOUND banner, per-row fix hints.
+- **Audit Trail** — read-only merged timeline of `labels.jsonl` and
+  `feedback.jsonl`, newest first, filterable by action type; caption notes
+  operator identity is not tracked yet (Users & Roles is a later phase).
+
+All analytics are pure functions over `results/*_verdict.json` +
+`data/labels.jsonl` (headlessly testable, no schema changes, no new
+dependencies); verdict timestamps come from file mtimes, matching the Review
+& Repair page convention. Charts use Streamlit-native `st.line_chart` /
+`st.bar_chart` (pandas is a Streamlit hard dependency).
