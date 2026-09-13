@@ -370,3 +370,75 @@ All analytics are pure functions over `results/*_verdict.json` +
 dependencies); verdict timestamps come from file mtimes, matching the Review
 & Repair page convention. Charts use Streamlit-native `st.line_chart` /
 `st.bar_chart` (pandas is a Streamlit hard dependency).
+
+---
+
+## 10. Inspection & Training page (training mode, implemented 2026-09-13)
+
+The former **Inspection** page becomes **Inspection & Training** (RUN section,
+still first in the sidebar). A horizontal `st.radio` at the page top switches
+between two modes:
+
+- **Inspection** — exactly the previous behavior: demo banner + scenario
+  selector (demo mode only; it appears ONLY in this mode), upload + camera
+  snapshot, run pipeline, verdict banner. Nothing about the inspection flow,
+  demo logic, or verdict colors changed.
+- **Training** — capture-time OK/NG labeling straight from the browser webcam
+  (`st.camera_input`, works on cloud and local) or a single-image upload.
+
+### Training-mode flow
+
+1. Session fields: **Board variant** text input (default `DEMO-REV-A`) and a
+   read-only **session id** (timestamp, generated once per training-mode
+   entry, held in `session_state`).
+2. Capture: `st.camera_input("Capture board")` or the file-uploader fallback.
+   The image is written immediately to `data/raw/training/<session_id>/` and
+   held as a **pending preview** in `session_state`, so it survives reruns.
+3. The pending image is shown large with three actions: **✅ OK** (green
+   `#22c55e`), **❌ NG** (red `#ef4444` — same CSS marker-span pattern as the
+   Dataset Review page), **↺ Retake** (discards the pending capture).
+4. While an image is pending, an NG-detail row offers **Defect type (for NG)**
+   (missing part / wrong part / other / unspecified) and an optional
+   **Reference designator (e.g. R7)**. These are recorded with NG labels only
+   and ignored for OK.
+5. OK/NG saves through the SAME labeling helpers as the Dataset Review page:
+   collision-safe copy into `data/boards_ok|boards_ng/` (session+variant
+   prefixed filename), one append-only line in `data/labels.jsonl`. Pending
+   state clears and the camera is ready for the next shot immediately.
+6. A progress row shows OK/NG counts **for this session** (derived from the
+   ledger, so they survive restarts) plus dataset totals via `_count_images`.
+
+### Ledger extension (backward compatible)
+
+Training-mode label records add optional fields to the existing JSONL schema:
+`session`, `variant`, `defect_type`, `refdes` (NG only), and
+`origin: "training_mode"`. The ledger stays append-only; old lines simply lack
+the new fields and every reader (`_audit_rows`, `load_label_state`, Dataset
+Review) parses the extended lines unchanged.
+
+### Golden-board capture
+
+A **"Capture as golden board"** expander carries a prominent warning: saving
+overwrites `data/golden/golden_board.jpg`, and a REAL golden board also
+requires rebuilding `data/golden/expected_components.json` — the rule engine's
+source of truth — otherwise inspections compare the new image against the old
+component list. The save button stays disabled until the "I understand"
+checkbox is ticked and an image is pending; the success message repeats the
+`expected_components.json` reminder.
+
+### Honesty captions
+
+- "OK/NG board labels triage the dataset — detector training still needs
+  component-level box annotation (see docs/data_collection_guide.md)."
+- "On the cloud demo, labeled images vanish on redeploy — export the zip
+  below; run the local app for real data collection."
+
+Export reuses `build_dataset_zip` + `st.download_button` (same as Dataset
+Review).
+
+### Labeling → Dataset Review
+
+The **Labeling** page is renamed **Dataset Review** (BUILD section, before
+Dataset & Training) with a one-line intro clarifying the split of duties:
+bulk import / relabel / export lives here; capture-time labeling lives in
+Inspection & Training → Training mode. Its logic is unchanged.

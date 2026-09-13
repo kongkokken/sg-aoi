@@ -200,10 +200,13 @@ Admin simulation). Designed in detail in
 [docs/ui_design.md](docs/ui_design.md) (personas, wireframes, interaction
 flows, visual rules, state handling). Pages:
 
-- **RUN · Inspection** — capture/upload → optional alignment → verdict banner
-  (OK green / NG red, readable from a distance), annotated image, defect
-  table, NG override with logged reason. Phase 1 shows Branch A findings
-  (missing/wrong part) only.
+- **RUN · Inspection & Training** — mode toggle: *Inspection* is
+  capture/upload → optional alignment → verdict banner (OK green / NG red,
+  readable from a distance), annotated image, defect table, NG override with
+  logged reason; *Training* is capture-time OK/NG labeling from the browser
+  webcam or an upload (NG defect type + reference designator, session/variant
+  tracking, golden-board capture, dataset export). Phase 1 shows Branch A
+  findings (missing/wrong part) only.
 - **RUN · Review & Repair** — filterable past verdicts from `results/`,
   annotated image drill-down, false-reject/false-accept marking into
   `feedback.jsonl`.
@@ -212,8 +215,10 @@ flows, visual rules, state handling). Pages:
   station status.
 - **MONITOR · SPC** — date-range filter, FPY trend, defect Pareto by type and
   designator, p-chart with center line and UCL/LCL.
-- **BUILD · Labeling** — mark images OK/NG into `boards_ok`/`boards_ng` with
-  a `labels.jsonl` ledger and dataset zip export.
+- **BUILD · Dataset Review** (was "Labeling") — bulk import, relabel, and
+  export: mark images OK/NG into `boards_ok`/`boards_ng` with a
+  `labels.jsonl` ledger and dataset zip export. Capture-time labeling lives
+  in RUN · Inspection & Training.
 - **BUILD · Dataset & Training** — image counts per data folder, golden board
   and expected-components status, model file presence, retrain commands.
 - **ADMINISTRATION · Audit Trail** — read-only merged timeline of labeling

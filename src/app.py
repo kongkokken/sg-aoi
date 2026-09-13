@@ -2,9 +2,10 @@
 professional UI (docs/ui_proposal_sg_aoi.md §9, Season Group branding).
 
 Ten pages in a sectioned, role-filtered sidebar navigation:
-  RUN:            Inspection, Review & Repair (was "Review History")
+  RUN:            Inspection & Training (mode toggle: Inspection / Training),
+                  Review & Repair (was "Review History")
   MONITOR:        Dashboard (FPY / Pareto / NG feed / station status), SPC
-  BUILD:          Labeling, Dataset & Training
+  BUILD:          Dataset Review (was "Labeling"), Dataset & Training
   ADMINISTRATION: Audit Trail, Settings
   MAINTENANCE:    System Check
   (last)          Setup Wizard
@@ -75,9 +76,9 @@ LINE_NAME = "Season Group · PCBA Line 1"
 
 # --- Sectioned navigation + role simulation (demo only, no authentication) ---
 NAV_SECTIONS: list[tuple[str, list[str]]] = [
-    ("RUN", ["Inspection", "Review & Repair"]),
+    ("RUN", ["Inspection & Training", "Review & Repair"]),
     ("MONITOR", ["Dashboard", "SPC"]),
-    ("BUILD", ["Labeling", "Dataset & Training"]),
+    ("BUILD", ["Dataset Review", "Dataset & Training"]),
     ("ADMINISTRATION", ["Audit Trail", "Settings"]),
     ("MAINTENANCE", ["System Check"]),
 ]
@@ -419,7 +420,7 @@ def collect_system_checks(cfg: dict[str, Any] | None,
     else:
         add("Labels ledger", True,
             "no labels.jsonl yet — normal before the first labeling session",
-            "Nothing to do — the ledger is created by the Labeling page.")
+            "Nothing to do — the ledger is created by Dataset Review or training mode.")
 
     return rows
 
@@ -545,19 +546,26 @@ def save_uploaded_images(files: list[Any], data_root: Path) -> Path:
     return session_dir
 
 
-def label_image(src_path: Path, label: str, data_root: Path, session_tag: str = "") -> Path:
-    """COPY (not move) an image into boards_ok/boards_ng and append a ledger line."""
+def label_image(src_path: Path, label: str, data_root: Path, session_tag: str = "",
+                ledger_extra: dict[str, Any] | None = None) -> Path:
+    """COPY (not move) an image into boards_ok/boards_ng and append a ledger line.
+
+    `ledger_extra` merges optional fields into the ledger record (training mode
+    adds session / variant / defect_type / refdes / origin). The ledger is
+    append-only JSONL, so records with extra fields stay backward compatible —
+    older lines simply lack them.
+    """
     src_path = Path(src_path)
     dest_dir = _label_target_dir(label, data_root)
     dest_dir.mkdir(parents=True, exist_ok=True)
     prefix = f"{_sanitize_tag(session_tag)}_" if session_tag else ""
     dest = dest_dir / _collision_safe_name(dest_dir, prefix + src_path.name)
     shutil.copy2(src_path, dest)
-    _append_label_ledger(
-        {"action": "label", "source_path": str(src_path),
-         "saved_path": str(dest), "label": label},
-        _labels_ledger_path(data_root),
-    )
+    record: dict[str, Any] = {"action": "label", "source_path": str(src_path),
+                              "saved_path": str(dest), "label": label}
+    if ledger_extra:
+        record.update(ledger_extra)
+    _append_label_ledger(record, _labels_ledger_path(data_root))
     return dest
 
 
@@ -625,11 +633,82 @@ def build_dataset_zip(data_root: Path) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Page 1: Inspection
+# Training-mode helpers (Inspection & Training page) — pure functions with no
+# st.* calls, so they can be exercised headlessly (scripts/test_training_mode.py).
 # ---------------------------------------------------------------------------
 
-def page_inspection(cfg: dict[str, Any]) -> None:
-    st.header("Inspection")
+def _new_session_id(now: datetime | None = None) -> str:
+    """Timestamp id for one training-mode entry (e.g. '20260913_143022')."""
+    return (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+
+
+def save_pending_capture(data: bytes, suffix: str, data_root: Path,
+                         session_id: str) -> Path:
+    """Persist one captured/uploaded image under data/raw/training/<session>/.
+
+    Writing immediately (instead of holding bytes only in session_state) keeps
+    the pending preview stable across reruns and gives the ledger a real
+    source_path. Raw captures stay untouched by labeling — labeling copies.
+    """
+    session_dir = data_root / "raw" / "training" / _sanitize_tag(session_id)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    if suffix.lower() not in LABEL_EXTENSIONS:
+        suffix = ".jpg"
+    name = _collision_safe_name(session_dir, f"capture_{datetime.now():%H%M%S}{suffix}")
+    path = session_dir / name
+    path.write_bytes(data)
+    return path
+
+
+def training_session_counts(ledger_path: Path, session_id: str) -> dict[str, int]:
+    """OK/NG label counts recorded in the ledger for one training session."""
+    counts = {"OK": 0, "NG": 0}
+    for rec in _read_jsonl(ledger_path):
+        if rec.get("action") == "label" and rec.get("session") == session_id:
+            if rec.get("label") in counts:
+                counts[rec["label"]] += 1
+    return counts
+
+
+def save_golden_image(src_path: Path, golden_path: Path) -> Path:
+    """Overwrite the golden board image with a new capture.
+
+    The caller (training mode UI) is responsible for the warning that a REAL
+    golden board also requires rebuilding expected_components.json — the rule
+    engine's source of truth.
+    """
+    golden_path = Path(golden_path)
+    golden_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_path, golden_path)
+    return golden_path
+
+
+# ---------------------------------------------------------------------------
+# Page 1: Inspection & Training — mode toggle: Inspection / Training
+# ---------------------------------------------------------------------------
+
+def page_inspection_training(cfg: dict[str, Any]) -> None:
+    st.header("Inspection & Training")
+    mode = st.radio("Mode", ["Inspection", "Training"], horizontal=True,
+                    key="inspection_training_mode")
+
+    # Entering Training mode starts a fresh capture session: new session id,
+    # no leftover pending image from a previous entry.
+    prev_mode = st.session_state.get("_it_prev_mode")
+    if mode == "Training" and prev_mode != "Training":
+        st.session_state["training_session_id"] = _new_session_id()
+        st.session_state.pop("training_pending", None)
+    st.session_state["_it_prev_mode"] = mode
+
+    if mode == "Training":
+        _training_mode(cfg)
+    else:
+        _inspection_mode(cfg)
+
+
+def _inspection_mode(cfg: dict[str, Any]) -> None:
+    """Today's inspection flow, unchanged — demo banner + scenario selector
+    (demo mode only), upload + camera snapshot, run pipeline, verdict."""
 
     # --- demo mode (simulated detections, no trained model) -------------------
     demo_image: Path | None = None
@@ -862,6 +941,155 @@ def _resolved_run_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     return run_cfg
 
 
+def _training_mode(cfg: dict[str, Any]) -> None:
+    """Capture-time OK/NG labeling from the browser webcam (st.camera_input —
+    works on cloud and local) or a single-image upload. Uses the SAME labeling
+    helpers/ledger as the Dataset Review page, with extended ledger fields."""
+    data_root = PROJECT_ROOT / "data"
+    ledger_path = _labels_ledger_path(data_root)
+    session_id = st.session_state["training_session_id"]
+    _inject_labeling_css()  # shared OK-green / NG-red button styling
+
+    # --- session fields -----------------------------------------------------
+    col_variant, col_session = st.columns([2, 1])
+    with col_variant:
+        variant = st.text_input("Board variant", value="DEMO-REV-A",
+                                key="training_variant")
+    with col_session:
+        st.text_input("Session id", value=session_id, disabled=True,
+                      help="Generated once per training-mode entry; recorded on "
+                           "every label saved in this session.")
+
+    st.caption(
+        "OK/NG board labels triage the dataset — detector training still needs "
+        "component-level box annotation (see docs/data_collection_guide.md)."
+    )
+    st.caption(
+        "On the cloud demo, labeled images vanish on redeploy — export the zip "
+        "below; run the local app for real data collection."
+    )
+
+    # --- pending image: capture → preview → label -----------------------------
+    pending = st.session_state.get("training_pending")
+    if pending and not Path(pending).is_file():
+        st.session_state.pop("training_pending", None)  # file vanished externally
+        pending = None
+
+    if pending is None:
+        snapshot = st.camera_input("Capture board")
+        uploaded = st.file_uploader(
+            "…or upload a board image",
+            type=sorted(e.lstrip(".") for e in LABEL_EXTENSIONS),
+            key="training_upload",
+        )
+        capture = snapshot or uploaded
+        if capture is not None:
+            suffix = Path(getattr(capture, "name", "capture.jpg")).suffix or ".jpg"
+            path = save_pending_capture(capture.getbuffer(), suffix, data_root,
+                                        session_id)
+            st.session_state["training_pending"] = str(path)
+            st.rerun()
+        st.caption("Waiting for a board image…")
+    else:
+        pending_path = Path(pending)
+        st.image(str(pending_path), caption=f"Pending — {pending_path.name}",
+                 use_container_width=True)
+
+        defect_type = st.selectbox(
+            "Defect type (for NG)",
+            ["missing part", "wrong part", "other", "unspecified"],
+            index=3,
+            help="Recorded with NG labels only; ignored for OK.",
+        )
+        refdes = st.text_input(
+            "Reference designator (e.g. R7)", key="training_refdes",
+            help="Optional — recorded with NG labels only.",
+        )
+
+        def _apply_training_label(label: str) -> None:
+            extra: dict[str, Any] = {"session": session_id, "variant": variant,
+                                     "origin": "training_mode"}
+            if label == "NG":
+                extra["defect_type"] = defect_type
+                if refdes.strip():
+                    extra["refdes"] = refdes.strip()
+            dest = label_image(pending_path, label, data_root,
+                               session_tag=f"{session_id}_{variant}",
+                               ledger_extra=extra)
+            st.session_state.pop("training_pending", None)
+            st.session_state["training_last_save"] = (
+                f"{label} → {dest.name} — ready for the next board.")
+
+        col_ok, col_ng, col_retake = st.columns([3, 3, 2])
+        with col_ok:
+            st.markdown('<span class="aoi-ok-btn"></span>', unsafe_allow_html=True)
+            if st.button("✅ OK", use_container_width=True, key="training_ok"):
+                _apply_training_label("OK")
+                st.rerun()
+        with col_ng:
+            st.markdown('<span class="aoi-ng-btn"></span>', unsafe_allow_html=True)
+            if st.button("❌ NG", use_container_width=True, key="training_ng"):
+                _apply_training_label("NG")
+                st.rerun()
+        with col_retake:
+            if st.button("↺ Retake", use_container_width=True, key="training_retake"):
+                pending_path.unlink(missing_ok=True)  # discard the unlabeled capture
+                st.session_state.pop("training_pending", None)
+                st.rerun()
+
+    last_save = st.session_state.pop("training_last_save", None)
+    if last_save:
+        st.success(last_save)
+
+    # --- progress ---------------------------------------------------------------
+    counts = training_session_counts(ledger_path, session_id)
+    cols = st.columns(4)
+    cols[0].metric("✅ OK (this session)", counts["OK"])
+    cols[1].metric("❌ NG (this session)", counts["NG"])
+    cols[2].metric("boards_ok total", _count_images(data_root / "boards_ok"))
+    cols[3].metric("boards_ng total", _count_images(data_root / "boards_ng"))
+
+    # --- golden board capture -----------------------------------------------------
+    with st.expander("⚠ Capture as golden board"):
+        st.warning(
+            "**This overwrites `data/golden/golden_board.jpg`.** The golden "
+            "image is only half of the golden reference — the rule engine's "
+            "source of truth is `data/golden/expected_components.json`. A REAL "
+            "golden board therefore requires REBUILDING "
+            "`expected_components.json` (reference designators, classes, "
+            "bboxes) for the new board; otherwise every inspection compares "
+            "the new image against the OLD component list."
+        )
+        golden_confirm = st.checkbox(
+            "I understand this overwrites the golden board image and that "
+            "expected_components.json must be rebuilt for a new board.",
+            key="golden_confirm",
+        )
+        if st.button("Save pending image as golden board",
+                     disabled=not (golden_confirm and pending),
+                     use_container_width=True, key="golden_save"):
+            golden_path = _resolve(
+                cfg.get("golden", {}).get("image", "data/golden/golden_board.jpg")
+            ) or (PROJECT_ROOT / "data" / "golden" / "golden_board.jpg")
+            save_golden_image(Path(pending), golden_path)
+            st.success(
+                f"Golden board image saved to {golden_path}. Reminder: rebuild "
+                "`expected_components.json` for this board before trusting "
+                "inspection verdicts (format in data/README.md)."
+            )
+
+    # --- export ----------------------------------------------------------------------
+    st.subheader("Export")
+    st.download_button(
+        "⬇ Download labeled dataset (.zip)",
+        data=build_dataset_zip(data_root),
+        file_name=f"pcba_aoi_labeled_dataset_{datetime.now():%Y%m%d_%H%M%S}.zip",
+        mime="application/zip",
+        use_container_width=True,
+        key="training_export",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Page 2: Review & Repair (was "Review History")
 # ---------------------------------------------------------------------------
@@ -874,7 +1102,7 @@ def page_history(cfg: dict[str, Any]) -> None:
     ) if results_dir.is_dir() else []
 
     if not verdict_files:
-        st.caption("No inspections yet — run your first board on the Inspection page.")
+        st.caption("No inspections yet — run your first board on the Inspection & Training page.")
         return
 
     records: list[dict[str, Any]] = []
@@ -1039,7 +1267,7 @@ def page_settings(config_path: Path, cfg: dict[str, Any]) -> None:
             st.error(f"Save failed: {exc}")
 
     st.caption(
-        "Sample-image test: use the Inspection page with a known NG board from "
+        "Sample-image test: use the Inspection & Training page with a known NG board from "
         "data/boards_ng to preview threshold effects before saving."
     )
 
@@ -1089,7 +1317,13 @@ def _next_unlabeled(paths: list[str], labels: dict[str, Any], after: int) -> int
 
 
 def page_labeling() -> None:
-    st.header("Labeling — mark boards OK / NG")
+    st.header("Dataset Review — bulk import, relabel & export")
+    st.caption(
+        "Bulk dataset maintenance: import image batches or webcam sessions, fix "
+        "labels, and export the labeled dataset. Capture-time labeling (camera "
+        "→ OK/NG in one click) lives on the **Inspection & Training** page in "
+        "Training mode."
+    )
     st.caption(
         "First step of training the model: build the `boards_ok` / `boards_ng` "
         "dataset one image at a time. Labeled images are **copied** into "
@@ -1360,7 +1594,7 @@ def page_dashboard(cfg: dict[str, Any]) -> None:
     records = _load_verdict_records(results_dir)
     if not records:
         st.info(
-            "No inspections yet — run your first board on the **Inspection** "
+            "No inspections yet — run your first board on the **Inspection & Training** "
             "page and this dashboard will light up."
         )
         return
@@ -1445,7 +1679,7 @@ def page_spc(cfg: dict[str, Any]) -> None:
     results_dir = _results_dir(cfg)
     records = _load_verdict_records(results_dir)
     if not records:
-        st.info("No inspection data yet — run boards on the **Inspection** page first.")
+        st.info("No inspection data yet — run boards on the **Inspection & Training** page first.")
         return
 
     import pandas as pd  # noqa: PLC0415
@@ -1695,15 +1929,15 @@ def main() -> None:
     if cfg is None:
         st.stop()
 
-    if page == "Inspection":
-        page_inspection(cfg)
+    if page == "Inspection & Training":
+        page_inspection_training(cfg)
     elif page == "Review & Repair":
         page_history(cfg)
     elif page == "Dashboard":
         page_dashboard(cfg)
     elif page == "SPC":
         page_spc(cfg)
-    elif page == "Labeling":
+    elif page == "Dataset Review":
         page_labeling()
     elif page == "Dataset & Training":
         page_dataset(cfg)
