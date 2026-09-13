@@ -166,6 +166,48 @@ def _model_status(cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _detection_source(cfg: dict[str, Any],
+                      demo_active: bool | None = None) -> tuple[str, str]:
+    """Which detection backend would actually drive the verdict right now.
+
+    Returns (kind, label) with kind in {"model", "demo", "precomputed", "none"}
+    and label a one-line status string shown next to the verdict so operators
+    can see whether OK/NG comes from the trained model or from simulated data.
+    Precedence mirrors infer_pipeline.run_detection: a configured
+    precomputed_json wins over an exported model; demo mode repoints
+    precomputed_json at the scripted scenario detections.
+
+    Pure function (no st.*) — exercised headlessly by
+    scripts/test_inspection_flow.py.
+    """
+    if demo_active is None:
+        demo_active = _demo_active()
+    det = cfg.get("detection", {})
+    if demo_active:
+        return "demo", "Detection source: DEMO — simulated detections"
+    pre = _resolve(det.get("precomputed_json"))
+    if det.get("precomputed_json") and pre is not None and pre.is_file():
+        return "precomputed", "Detection source: precomputed JSON (debug)"
+    det_dir = _resolve(det.get("model_dir"))
+    if det_dir and (det_dir / "model.pdmodel").is_file():
+        model_ref = det.get("model_dir") or str(det_dir)
+        return "model", f"Detection source: trained model ({model_ref})"
+    return "none", ("Detection source: none — no trained model and no "
+                    "detections configured")
+
+
+def _upload_ident(uploaded: Any) -> tuple[str, int] | None:
+    """Stable identity (name, size) for an UploadedFile across reruns.
+
+    st.camera_input / st.file_uploader re-return the same file on every rerun;
+    comparing identities lets the inspection page tell "a NEW snapshot
+    arrived" apart from "the same widget value again".
+    """
+    if uploaded is None:
+        return None
+    return (str(getattr(uploaded, "name", "?")), int(getattr(uploaded, "size", 0)))
+
+
 def _count_images(folder: Path | None, recursive: bool = True) -> int:
     if not folder or not folder.is_dir():
         return 0
@@ -707,12 +749,21 @@ def page_inspection_training(cfg: dict[str, Any]) -> None:
 
 
 def _inspection_mode(cfg: dict[str, Any]) -> None:
-    """Today's inspection flow, unchanged — demo banner + scenario selector
-    (demo mode only), upload + camera snapshot, run pipeline, verdict."""
+    """Two-step inspection flow (docs/ui_design.md §11):
+
+    Step 1 "Board image" — 📷 Take snapshot (st.camera_input, works locally
+    and on Streamlit Cloud) with the file uploader as fallback; the most
+    recent image from either source is held in session_state as the CURRENT
+    SNAPSHOT (survives reruns) until "🗑 Clear".
+    Step 2 "🔍 Inspection" — runs the pipeline on the current snapshot and
+    renders the verdict banner + annotated image + defect table, always with
+    a verdict-source indicator (trained model / demo / precomputed JSON).
+    """
 
     # --- demo mode (simulated detections, no trained model) -------------------
     demo_image: Path | None = None
-    if _demo_active():
+    demo_on = _demo_active()
+    if demo_on:
         st.info(
             "🧪 **DEMO MODE — simulated detections (no trained model).** "
             "The verdict below is produced by the real rule engine from "
@@ -729,6 +780,7 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
 
     status = _model_status(cfg)
     det_ready, ano_ready = status["detection_ready"], status["anomaly_ready"]
+    source_kind, source_label = _detection_source(cfg, demo_active=demo_on)
 
     # Explicit degradation banners (ui_design.md §5) — amber, never silent.
     if not det_ready:
@@ -746,74 +798,91 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
             "is deferred and not active — this is expected in phase 1."
         )
 
-    # --- capture -------------------------------------------------------------
+    # --- Step 1: board image ---------------------------------------------------
     st.subheader("1. Board image")
-    input_path: Path | None = None
+    snapshot = st.camera_input(
+        "📷 Take snapshot",
+        help="Uses this device's camera through the browser — works on a "
+             "local station and on Streamlit Cloud alike.",
+    )
+    uploaded = st.file_uploader(
+        "…or upload a board image (fallback)",
+        type=[e.lstrip(".") for e in sorted(IMAGE_EXTENSIONS)],
+        key="inspection_upload",
+    )
+    # Whichever source delivered the most recent image becomes the current
+    # snapshot. Identity markers keep the same widget value from re-winning
+    # on every rerun.
+    for origin, capture in (("upload", uploaded), ("camera", snapshot)):
+        ident = _upload_ident(capture)
+        if ident is not None and ident != st.session_state.get(f"_insp_seen_{origin}"):
+            st.session_state[f"_insp_seen_{origin}"] = ident
+            st.session_state["inspection_snapshot"] = {
+                "name": str(getattr(capture, "name", f"{origin}.jpg")),
+                "bytes": capture.getbuffer().tobytes(),
+                "origin": origin,
+            }
+            st.session_state.pop("inspection", None)  # new image, old verdict stale
+
+    current = st.session_state.get("inspection_snapshot")
+    demo_fallback = demo_image is not None and demo_image.is_file()
+
     align_first = False
-    if demo_image is not None and demo_image.is_file():
+    golden_path: str | None = None
+    if current:
+        st.image(
+            current["bytes"],
+            caption=f"Current snapshot — {current['name']} "
+                    f"(from {current['origin']})",
+            use_container_width=True,
+        )
+        if demo_on:
+            st.caption(
+                "Demo detections are simulated for the demo board layout; "
+                "the boxes shown correspond to the demo scenario, not to "
+                "objects in your photo."
+            )
+        if st.button("🗑 Clear", key="inspection_clear"):
+            for key in ("inspection_snapshot", "_insp_seen_camera",
+                        "_insp_seen_upload", "inspection"):
+                st.session_state.pop(key, None)
+            st.rerun()
+        align_first = st.checkbox(
+            "Run board alignment first (raw capture, not yet aligned)", value=False
+        )
+        if align_first:
+            golden_default = cfg.get("golden", {}).get(
+                "image", "data/golden/golden_board.jpg")
+            golden_path = st.text_input("Golden reference image", str(golden_default))
+    elif demo_fallback:
         # Demo boards are already in the canonical aligned view — the capture
         # and alignment steps are replaced by the scripted scenario image.
         st.image(str(demo_image), caption=f"Demo board: {demo_image.name}",
                  use_container_width=True)
-        input_path = demo_image
     else:
-        src_tab_up, src_tab_cam = st.tabs(["Upload", "Camera snapshot"])
-        with src_tab_up:
-            uploaded = st.file_uploader(
-                "Upload a board image", type=[e.lstrip(".") for e in sorted(IMAGE_EXTENSIONS)]
-            )
-        with src_tab_cam:
-            snapshot = st.camera_input("Or take a snapshot")
-        capture = uploaded or snapshot
+        st.caption("Waiting for a board image…")
 
-        align_first = st.checkbox(
-            "Run board alignment first (raw capture, not yet aligned)", value=False
-        )
-        golden_default = cfg.get("golden", {}).get("image", "data/golden/golden_board.jpg")
-        golden_path = None
-        if align_first:
-            golden_path = st.text_input("Golden reference image", str(golden_default))
-
-        if capture is None:
-            st.caption("Waiting for a board image…")
-            return
-
-        suffix = Path(getattr(capture, "name", "snapshot.jpg")).suffix or ".jpg"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(capture.getbuffer())
-            input_path = Path(tmp.name)
-
-    # --- alignment -----------------------------------------------------------
-    if align_first:
-        import cv2  # noqa: PLC0415
-
-        from align_board import align_image  # noqa: PLC0415
-
-        golden_file = _resolve(golden_path)
-        image = cv2.imread(str(input_path))
-        golden = cv2.imread(str(golden_file)) if golden_file and golden_file.is_file() else None
-        if image is None or golden is None:
-            st.error(
-                "❌ Alignment not possible — could not read the uploaded image or the "
-                f"golden reference ({golden_file}). Check the path and retry."
-            )
-            return
-        result = align_image(image, golden)
-        if result.warped is None:
-            # Alignment-failure state (ui_design.md §5): no verdict is produced.
-            st.error(
-                "❌ Board not detected / fiducials not found — reseat the board, "
-                "check lighting, and retry. No verdict was produced."
-            )
-            return
-        cv2.imwrite(str(input_path), result.warped)
-        st.success(f"Aligned via {result.method}.")
-
-    # --- run ------------------------------------------------------------------
+    # --- Step 2: run -----------------------------------------------------------
     st.subheader("2. Inspection")
-    if st.button("▶ Run inspection", type="primary", use_container_width=True):
+    have_image = bool(current) or demo_fallback
+    if not have_image:
+        st.info("Take a snapshot (or upload a board image) first.")
+    elif st.button("🔍 Inspection", type="primary", use_container_width=True):
         with st.spinner("Running detection + anomaly branches…"):
             try:
+                if current:
+                    suffix = Path(current["name"]).suffix.lower()
+                    if suffix not in IMAGE_EXTENSIONS:
+                        suffix = ".jpg"
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                        tmp.write(current["bytes"])
+                        input_path = Path(tmp.name)
+                    if align_first:
+                        if not _align_snapshot_in_place(input_path, golden_path, current):
+                            return  # error banner already shown; no verdict
+                else:
+                    input_path = demo_image
+
                 from infer_pipeline import inspect_board  # noqa: PLC0415
 
                 run_cfg = _resolved_run_cfg(cfg)
@@ -822,6 +891,7 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
                     "verdict": verdict,
                     "annotated": annotated,
                     "cfg": run_cfg,
+                    "source_label": source_label,
                 }
                 # Persist immediately so Review History sees it (no extra click).
                 from infer_pipeline import save_outputs  # noqa: PLC0415
@@ -833,7 +903,8 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
 
     state = st.session_state.get("inspection")
     if not state:
-        st.caption("Press **Run inspection** to get a verdict.")
+        if have_image:
+            st.caption("Press **🔍 Inspection** to get a verdict.")
         return
 
     verdict = state["verdict"]
@@ -869,6 +940,11 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
             "⚠️ PARTIAL verdict — anomaly checks are enabled in the config but "
             "the anomaly model is unavailable; findings reflect Branch A only."
         )
+
+    # Verdict-source indicator (ui_design.md §11): the operator's mental model
+    # is "the verdict comes from the pictures we trained the system with" —
+    # until a trained model exists, say so explicitly next to every verdict.
+    st.caption(state.get("source_label") or source_label)
 
     # --- annotated image + defect table ----------------------------------------
     import cv2  # noqa: PLC0415
@@ -914,6 +990,43 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
 
     with st.expander("Raw verdict JSON"):
         st.json(json.loads(json.dumps(asdict(verdict))))
+
+
+def _align_snapshot_in_place(input_path: Path, golden_path: str | None,
+                             current: dict[str, Any]) -> bool:
+    """Align the snapshot temp file against the golden reference.
+
+    On success the aligned pixels are written back to input_path AND into the
+    session-state snapshot (so the "Current snapshot" preview and any re-run
+    use the aligned image). Returns False after showing an explicit error
+    banner when alignment is impossible — no verdict is produced then
+    (ui_design.md §5).
+    """
+    import cv2  # noqa: PLC0415
+
+    from align_board import align_image  # noqa: PLC0415
+
+    golden_file = _resolve(golden_path)
+    image = cv2.imread(str(input_path))
+    golden = cv2.imread(str(golden_file)) if golden_file and golden_file.is_file() else None
+    if image is None or golden is None:
+        st.error(
+            "❌ Alignment not possible — could not read the snapshot or the "
+            f"golden reference ({golden_file}). Check the path and retry."
+        )
+        return False
+    result = align_image(image, golden)
+    if result.warped is None:
+        st.error(
+            "❌ Board not detected / fiducials not found — reseat the board, "
+            "check lighting, and retry. No verdict was produced."
+        )
+        return False
+    cv2.imwrite(str(input_path), result.warped)
+    current["bytes"] = input_path.read_bytes()
+    st.session_state["inspection_snapshot"] = current
+    st.success(f"Aligned via {result.method}.")
+    return True
 
 
 def _resolved_run_cfg(cfg: dict[str, Any]) -> dict[str, Any]:

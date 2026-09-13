@@ -442,3 +442,48 @@ The **Labeling** page is renamed **Dataset Review** (BUILD section, before
 Dataset & Training) with a one-line intro clarifying the split of duties:
 bulk import / relabel / export lives here; capture-time labeling lives in
 Inspection & Training → Training mode. Its logic is unchanged.
+
+## 11. Inspection snapshot flow (implemented 2026-09-13)
+
+Inspection mode on the **Inspection & Training** page is an explicit
+two-step, two-button flow:
+
+1. **Step 1 · Board image** — **"📷 Take snapshot"** (`st.camera_input`,
+   the viewer's own camera via the browser, so it works on a local station
+   and on Streamlit Cloud alike) is the primary source; the file uploader
+   remains as a fallback. Whichever source delivered the most recent image
+   becomes the **Current snapshot**, held in `session_state`
+   (`inspection_snapshot`, identity markers `_insp_seen_camera` /
+   `_insp_seen_upload`) so it survives reruns and is shown large until the
+   small **"🗑 Clear"** control resets it. A new snapshot invalidates any
+   verdict rendered from the previous image.
+2. **Step 2 · 🔍 Inspection** — one primary button (replacing "▶ Run
+   inspection"). With no snapshot present it does not run; an info hint
+   says "Take a snapshot (or upload a board image) first." On click the
+   pipeline runs on the current snapshot and renders the verdict banner,
+   annotated image and defect table as before. Optional board alignment
+   happens inside the run; the aligned image replaces the stored snapshot.
+
+### Verdict-source indicator
+
+The operator's mental model is "the verdict is based on the pictures we
+trained the system with" — so wherever the verdict renders, a status line
+names the detection backend that actually produced it, derived from the
+config + filesystem by `_detection_source()` (which mirrors
+`infer_pipeline.run_detection`'s precedence: a configured
+`precomputed_json` wins over an exported model):
+
+- `Detection source: trained model (<detection.model_dir>)` — exported
+  `model.pdmodel` present;
+- `Detection source: DEMO — simulated detections` — demo mode;
+- `Detection source: precomputed JSON (debug)` — precomputed detections;
+- `Detection source: none — no trained model and no detections configured`.
+
+### Demo-mode caveat with user snapshots
+
+In demo mode an operator may still snap or upload THEIR OWN board: the
+pipeline then runs on that photo with the selected scenario's scripted
+detections, and — in addition to the demo banner — a caption states:
+"Demo detections are simulated for the demo board layout; the boxes shown
+correspond to the demo scenario, not to objects in your photo." With no
+user snapshot, the scripted demo board image is inspected as before.

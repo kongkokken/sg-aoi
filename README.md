@@ -200,10 +200,14 @@ Admin simulation). Designed in detail in
 [docs/ui_design.md](docs/ui_design.md) (personas, wireframes, interaction
 flows, visual rules, state handling). Pages:
 
-- **RUN · Inspection & Training** — mode toggle: *Inspection* is
-  capture/upload → optional alignment → verdict banner (OK green / NG red,
-  readable from a distance), annotated image, defect table, NG override with
-  logged reason; *Training* is capture-time OK/NG labeling from the browser
+- **RUN · Inspection & Training** — mode toggle: *Inspection* is an
+  explicit two-step flow — **"📷 Take snapshot"** (browser webcam, works
+  locally and on Streamlit Cloud; upload as fallback) holds the current
+  snapshot, then **"🔍 Inspection"** runs the pipeline → verdict banner
+  (OK green / NG red, readable from a distance) with a verdict-source
+  indicator (trained model / demo / precomputed JSON), annotated image,
+  defect table, NG override with logged reason; *Training* is capture-time
+  OK/NG labeling from the browser
   webcam or an upload (NG defect type + reference designator, session/variant
   tracking, golden-board capture, dataset export). Phase 1 shows Branch A
   findings (missing/wrong part) only.
