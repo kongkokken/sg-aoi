@@ -387,6 +387,8 @@ dependencies); verdict timestamps come from file mtimes, matching the Review
 
 ## 10. Inspection & Training page (training mode, implemented 2026-09-13)
 
+> Page renamed to **Production** — see §14.
+
 The former **Inspection** page becomes **Inspection & Training** (RUN section,
 still first in the sidebar). A horizontal `st.radio` at the page top switches
 between two modes:
@@ -457,6 +459,8 @@ Inspection & Training → Training mode. Its logic is unchanged.
 
 ## 11. Inspection snapshot flow (implemented 2026-09-13)
 
+> Page renamed to **Production** — see §14.
+
 Inspection mode on the **Inspection & Training** page is an explicit
 two-step, two-button flow:
 
@@ -501,6 +505,9 @@ correspond to the demo scenario, not to objects in your photo." With no
 user snapshot, the scripted demo board image is inspected as before.
 
 ## 12. Item onboarding — Create New (implemented 2026-09-28)
+
+> Page renamed to **Inspection Item Maintenance** (the wizard is its
+> "Create New" section) — see §14.
 
 "Learning a new item instead of the demo PCBA": the **➕ Create New** page
 (first page of the BUILD section, Engineer + Admin) is a 4-step wizard driven
@@ -555,6 +562,8 @@ is normal — the demo board is the default).
 
 ## 13. Auto-judge + confirm/override learning loop (implemented 2026-09-28)
 
+> REJECT labels now collect a defect type first — see §14.
+
 Item-agnostic concept revision (docs/concept_revision.md): for any
 registered (non-demo) item, the **similarity learning engine** is the
 default judge — no component annotation or trained model required.
@@ -588,3 +597,33 @@ default judge — no component annotation or trained model required.
   JSON, and a trained PP-YOLOE+ model keep their existing precedence.
 - Dashboard station status gains a cheap "Similarity learning
   (auto-judge): <item> — N ok / M ng learned" row.
+
+---
+
+## 14. Production rename, defect-type catalogs & item maintenance (2026-09-28)
+
+- **Renames**: the RUN page **Inspection & Training** becomes **Production**
+  (the Inspection / Training mode toggle inside it is unchanged), and the
+  BUILD page **➕ Create New** becomes **Inspection Item Maintenance**
+  (Engineer/Admin only; an in-page role check backs the nav filtering).
+- **Per-item defect-type catalog**: each registry entry carries
+  `"defect_types"`, seeded on creation with the defaults (Missing part,
+  Wrong part, Wrong orientation, Contamination, Scratch / cosmetic, Other);
+  missing/empty catalogs fall back to the defaults, so legacy items keep
+  working.
+- **REJECT → "Why is this rejected?" popup**: whenever a human label on the
+  Production page resolves to *reject* — REVIEW → ❌ Reject, flip on an
+  auto-ACCEPT, ✅ Correct on an auto-REJECT, or Training mode's ❌ NG — a
+  modal first collects the defect type from the item's catalog ("Save &
+  learn" / "Learn without defect type"). The choice is recorded on the
+  learned ledger entry, the feedback log, and the Review & Repair record
+  (which displays it); ×-closing the popup re-opens it on the next rerun,
+  and a new snapshot / item switch cancels it. Accept labels and the
+  scripted demo flow never pop it.
+- **Inspection Item Maintenance** offers two sections: **Create New** (the
+  onboarding wizard, unchanged) and **Modification** — per selected item:
+  add / rename / delete defect types (renames also rewrite the item's
+  learned examples; Review & Repair history keeps the text recorded at the
+  time), edit name / description / revision (the item id never changes),
+  and a danger-zone delete (registry entry + files, double-confirmed;
+  inspection history is kept and shows the item as archived).

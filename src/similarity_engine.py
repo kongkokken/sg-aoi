@@ -590,13 +590,15 @@ def load_gallery(item_id: str | None = None,
 # ---------------------------------------------------------------------------
 
 def learn(image_path: str | Path, label: str, item_id: str | None = None,
-          data_root: str | Path | None = None) -> dict[str, Any]:
+          data_root: str | Path | None = None,
+          defect_type: str | None = None) -> dict[str, Any]:
     """Add a user-labeled image to the item's galleries and refresh the cache.
 
     Appends one record to the learned ledger (append-only JSONL) and returns
     the updated gallery counts. Exact duplicate (same file, same label) is a
     no-op for the ledger. Raises ValueError on an unreadable image or bad
-    label.
+    label. ``defect_type`` (optional, from the operator's REJECT popup) is
+    recorded on the ledger entry only — galleries and scoring are unchanged.
     """
     root = _data_root(data_root)
     label = _normalize_label(label)
@@ -611,6 +613,8 @@ def learn(image_path: str | Path, label: str, item_id: str | None = None,
         ledger.parent.mkdir(parents=True, exist_ok=True)
         record = {"path": str(path), "label": label,
                   "timestamp": datetime.now().isoformat(timespec="seconds")}
+        if defect_type:
+            record["defect_type"] = defect_type
         with ledger.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
 

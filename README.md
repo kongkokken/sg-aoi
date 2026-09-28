@@ -205,7 +205,7 @@ Admin simulation). Designed in detail in
 [docs/ui_design.md](docs/ui_design.md) (personas, wireframes, interaction
 flows, visual rules, state handling). Pages:
 
-- **RUN · Inspection & Training** — mode toggle: *Inspection* is an
+- **RUN · Production** — mode toggle: *Inspection* is an
   explicit two-step flow — **"📷 Take snapshot"** (browser webcam, works
   locally and on Streamlit Cloud; upload as fallback) holds the current
   snapshot, then **"🔍 Inspection"** runs the pipeline → verdict banner
@@ -214,7 +214,11 @@ flows, visual rules, state handling). Pages:
   defect table, NG override with logged reason; *Training* is capture-time
   OK/NG labeling from the browser
   webcam or an upload (NG defect type + reference designator, session/variant
-  tracking, golden-board capture, dataset export). Phase 1 shows Branch A
+  tracking, golden-board capture, dataset export). Whenever a human labels a
+  capture REJECT — confirming/flipping an auto-verdict or an NG label in
+  Training mode — a **"Why is this rejected?"** popup first collects the
+  defect type from the item's catalog (recorded in the learned ledger, the
+  feedback log, and the Review & Repair record). Phase 1 shows Branch A
   findings (missing/wrong part) only.
 - **RUN · Review & Repair** — filterable past verdicts from `results/` with
   an **Item under inspection** filter (item-tagged records from both the
@@ -225,17 +229,22 @@ flows, visual rules, state handling). Pages:
   station status.
 - **MONITOR · SPC** — date-range filter, FPY trend, defect Pareto by type and
   designator, p-chart with center line and UCL/LCL.
-- **BUILD · ➕ Create New** — item-onboarding wizard: name the product,
-  capture a few verified-good boards (camera or upload), pick the golden
-  board, and register the item under `data/items/<item_id>/` with an honest
-  empty `expected_components.json` template. Registered items become
-  selectable as the sidebar **Active item**, which repoints the golden
-  reference in memory (pipeline.yaml untouched); until components are
-  annotated, inspections for the item show an amber "setup pending" state.
+- **BUILD · Inspection Item Maintenance** (Engineer/Admin) — two sections:
+  *Create New* is the item-onboarding wizard (name the product, capture a
+  few verified-good boards, pick the golden board, register the item under
+  `data/items/<item_id>/` with an honest empty `expected_components.json`
+  template); *Modification* maintains a registered item — add / rename /
+  delete entries in its **defect-type catalog** (renames also rewrite the
+  item's learned examples), edit name / description / revision, or delete
+  the item (registry entry + files; Review & Repair history is kept and
+  shows the item as archived). Registered items become selectable as the
+  sidebar **Active item**, which repoints the golden reference in memory
+  (pipeline.yaml untouched); until components are annotated, inspections
+  for the item show an amber "setup pending" state.
 - **BUILD · Dataset Review** (was "Labeling") — bulk import, relabel, and
   export: mark images OK/NG into `boards_ok`/`boards_ng` with a
   `labels.jsonl` ledger and dataset zip export. Capture-time labeling lives
-  in RUN · Inspection & Training.
+  in RUN · Production.
 - **BUILD · Dataset & Training** — image counts per data folder, golden board
   and expected-components status, model file presence, retrain commands.
 - **ADMINISTRATION · Audit Trail** — read-only merged timeline of labeling

@@ -1,4 +1,4 @@
-"""Headless tests for the "Create New" item registry + config override.
+"""Headless tests for the item registry + config override + item maintenance.
 
 Run with the conda env:  D:\\miniforge3\\envs\\aoi-app\\python.exe scripts/test_items.py
 
@@ -7,11 +7,16 @@ but no st.* calls are made by the helpers under test). All registry operations
 run in a TEMP data dir; the real data/items/ is never touched. Covers:
   * slugify_item_id — spaces, unicode, empty, invalid characters.
   * create_item — validation (empty/invalid/duplicate ids) + registry
-    create/read round-trip (list_items / get_item).
+    create/read round-trip (list_items / get_item) + defect-type seeding.
   * item_status — transitions: no golden -> setup pending; golden + 0
     components -> setup pending; golden + >0 components -> ready.
   * _item_cfg_override — produces the item's golden paths and NEVER mutates
     the base config dict.
+  * item_defect_types — normalization of missing/empty catalogs to
+    DEFAULT_DEFECT_TYPES (legacy items keep working).
+  * update_item — name/description/revision/defect_types updates, unknown id.
+  * delete_item — registry entry + files removed; missing dir tolerated.
+  * _rewrite_learned_defect_type — renames defect types in learned.jsonl.
 """
 
 from __future__ import annotations
@@ -160,9 +165,92 @@ def main() -> int:
         # --- 6. empty/corrupt registry reads as empty ------------------------------
         check("missing registry -> no items",
               app.list_items(tmp / "no_such_dir") == [])
-        (items_root / "index.json").write_text("not json{", encoding="utf-8")
+        corrupt = tmp / "corrupt" / "items"
+        corrupt.mkdir(parents=True)
+        (corrupt / "index.json").write_text("not json{", encoding="utf-8")
         check("corrupt registry -> no items (no crash)",
-              app.list_items(items_root) == [])
+              app.list_items(corrupt) == [])
+
+        # --- 7. defect-type catalog: seeding + normalization ----------------------
+        check("create_item seeds default defect types",
+              app.get_item("widget-a", items_root)["defect_types"]
+              == app.DEFAULT_DEFECT_TYPES)
+        check("item_defect_types returns the item's catalog",
+              app.item_defect_types("widget-a", items_root)
+              == app.DEFAULT_DEFECT_TYPES)
+        check("item_defect_types default scope -> defaults copy",
+              app.item_defect_types(None, items_root)
+              == app.DEFAULT_DEFECT_TYPES
+              and app.item_defect_types(None, items_root)
+              is not app.DEFAULT_DEFECT_TYPES)
+        check("item_defect_types unknown id -> defaults",
+              app.item_defect_types("nope", items_root)
+              == app.DEFAULT_DEFECT_TYPES)
+        # Legacy entries without the field normalize to the defaults.
+        index = json.loads(
+            (items_root / "index.json").read_text(encoding="utf-8"))
+        del index["widget-a"]["defect_types"]
+        index["widget-b"]["defect_types"] = []
+        (items_root / "index.json").write_text(json.dumps(index),
+                                               encoding="utf-8")
+        check("legacy entry without defect_types -> defaults",
+              app.item_defect_types("widget-a", items_root)
+              == app.DEFAULT_DEFECT_TYPES)
+        check("empty defect_types -> defaults",
+              app.item_defect_types("widget-b", items_root)
+              == app.DEFAULT_DEFECT_TYPES)
+
+        # --- 8. update_item ---------------------------------------------------------
+        updated = app.update_item("widget-a", name="Widget A+", revision="Rev B",
+                                  defect_types=["Scratch", "Missing part"],
+                                  items_root=items_root)
+        check("update_item applies fields",
+              updated["name"] == "Widget A+"
+              and updated["revision"] == "Rev B"
+              and updated["defect_types"] == ["Scratch", "Missing part"],
+              json.dumps(updated, default=str))
+        check("update_item persisted + keeps unrelated fields",
+              app.get_item("widget-a", items_root)["description"] == "demo"
+              and app.item_defect_types("widget-a", items_root)
+              == ["Scratch", "Missing part"])
+        try:
+            app.update_item("nope", name="X", items_root=items_root)
+            check("update_item unknown id rejected", False)
+        except ValueError:
+            check("update_item unknown id rejected", True)
+
+        # --- 9. _rewrite_learned_defect_type -----------------------------------------
+        ledger = items_root / "widget-a" / "learned.jsonl"
+        ledger.write_text(
+            json.dumps({"path": "a.jpg", "label": "reject",
+                        "defect_type": "Scratch"}) + "\n"
+            + json.dumps({"path": "b.jpg", "label": "reject",
+                          "defect_type": "Missing part"}) + "\n"
+            + json.dumps({"path": "c.jpg", "label": "accept"}) + "\n",
+            encoding="utf-8")
+        rewritten = app._rewrite_learned_defect_type(
+            "widget-a", "Scratch", "Scratch / cosmetic", items_root)
+        recs = [json.loads(ln) for ln in
+                ledger.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        check("learned.jsonl rewrite count", rewritten == 1, str(rewritten))
+        check("learned.jsonl old type renamed, others untouched",
+              recs[0]["defect_type"] == "Scratch / cosmetic"
+              and recs[1]["defect_type"] == "Missing part"
+              and "defect_type" not in recs[2],
+              json.dumps(recs))
+        check("rewrite with no matches -> 0",
+              app._rewrite_learned_defect_type(
+                  "widget-a", "No such type", "X", items_root) == 0)
+
+        # --- 10. delete_item ----------------------------------------------------------
+        app.delete_item("widget-b", items_root=items_root)
+        check("delete_item removes registry entry + dir",
+              app.get_item("widget-b", items_root) is None
+              and not (items_root / "widget-b").exists())
+        check("delete_item keeps unrelated entries",
+              app.get_item("widget-a", items_root) is not None)
+        app.delete_item("ghost", items_root=items_root)  # must not raise
+        check("delete_item tolerates missing entry/dir", True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

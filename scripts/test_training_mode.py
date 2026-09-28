@@ -1,4 +1,4 @@
-"""Headless tests for the Inspection & Training page's pure logic (training mode).
+"""Headless tests for the Production page's pure logic (training mode).
 
 Run with the conda env:  D:\\miniforge3\\envs\\aoi-app\\python.exe scripts/test_training_mode.py
 

@@ -2,10 +2,11 @@
 professional UI (docs/ui_proposal_sg_aoi.md §9, Season Group branding).
 
 Ten pages in a sectioned, role-filtered sidebar navigation:
-  RUN:            Inspection & Training (mode toggle: Inspection / Training),
+  RUN:            Production (mode toggle: Inspection / Training),
                   Review & Repair (was "Review History")
   MONITOR:        Dashboard (FPY / Pareto / NG feed / station status), SPC
-  BUILD:          ➕ Create New (item onboarding wizard), Dataset Review
+  BUILD:          Inspection Item Maintenance (item onboarding wizard +
+                  defect-type catalog / item edit / delete), Dataset Review
                   (was "Labeling"), Dataset & Training
   ADMINISTRATION: Audit Trail, Settings
   MAINTENANCE:    System Check
@@ -77,9 +78,10 @@ LINE_NAME = "Season Group · PCBA Line 1"
 
 # --- Sectioned navigation + role simulation (demo only, no authentication) ---
 NAV_SECTIONS: list[tuple[str, list[str]]] = [
-    ("RUN", ["Inspection & Training", "Review & Repair"]),
+    ("RUN", ["Production", "Review & Repair"]),
     ("MONITOR", ["Dashboard", "SPC"]),
-    ("BUILD", ["➕ Create New", "Dataset Review", "Dataset & Training"]),
+    ("BUILD", ["Inspection Item Maintenance", "Dataset Review",
+               "Dataset & Training"]),
     ("ADMINISTRATION", ["Audit Trail", "Settings"]),
     ("MAINTENANCE", ["System Check"]),
 ]
@@ -474,7 +476,8 @@ def collect_system_checks(cfg: dict[str, Any] | None,
         add("Items registered", True,
             f"{len(reg_items)} ({n_ready} ready)" if reg_items
             else "0 — default demo board in use",
-            "Nothing to do — onboard new products via BUILD · ➕ Create New.")
+            "Nothing to do — onboard new products via BUILD · Inspection "
+            "Item Maintenance.")
     except Exception as exc:  # noqa: BLE001 - informational row must not crash
         add("Items registered", True, f"registry unreadable: {exc}",
             "Check data/items/index.json.")
@@ -690,7 +693,7 @@ def build_dataset_zip(data_root: Path) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Training-mode helpers (Inspection & Training page) — pure functions with no
+# Training-mode helpers (Production page) — pure functions with no
 # st.* calls, so they can be exercised headlessly (scripts/test_training_mode.py).
 # ---------------------------------------------------------------------------
 
@@ -741,7 +744,7 @@ def save_golden_image(src_path: Path, golden_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Item registry ("➕ Create New" onboarding) — pure functions with no st.*
+# Item registry (onboarding + maintenance) — pure functions with no st.*
 # calls, so scripts/test_items.py can exercise them headlessly in a TEMP data
 # dir. Each item is a folder under data/items/<item_id>/ holding its own
 # golden board + expected components + the good-board captures collected
@@ -750,6 +753,19 @@ def save_golden_image(src_path: Path, golden_path: Path) -> Path:
 
 ITEMS_ROOT = PROJECT_ROOT / "data" / "items"
 DEFAULT_ITEM_LABEL = "Default (demo board)"
+
+# Per-item defect-type catalog: the choices offered in the "Why is this
+# rejected?" popup whenever a human labels a capture REJECT on the Production
+# page. Stored on the item's registry entry as "defect_types"; new items are
+# seeded with these defaults, legacy/empty entries fall back to a copy.
+DEFAULT_DEFECT_TYPES = [
+    "Missing part",
+    "Wrong part",
+    "Wrong orientation",
+    "Contamination",
+    "Scratch / cosmetic",
+    "Other",
+]
 
 
 def slugify_item_id(name: str) -> str:
@@ -815,6 +831,25 @@ def item_dir(item_id: str, items_root: Path = ITEMS_ROOT) -> Path:
     return Path(items_root) / item_id
 
 
+def item_defect_types(item_id: str | None,
+                      items_root: Path = ITEMS_ROOT) -> list[str]:
+    """The item's defect-type catalog for the REJECT popup.
+
+    Missing/empty catalogs (legacy items, or the default demo scope with
+    item_id None) normalize to a copy of DEFAULT_DEFECT_TYPES, so old
+    registries keep working without migration.
+    """
+    if item_id:
+        meta = load_items_index(items_root).get(item_id)
+        if isinstance(meta, dict):
+            catalog = meta.get("defect_types")
+            if isinstance(catalog, list):
+                cleaned = [str(d).strip() for d in catalog if str(d).strip()]
+                if cleaned:
+                    return cleaned
+    return list(DEFAULT_DEFECT_TYPES)
+
+
 def _count_item_components(item_id: str, items_root: Path = ITEMS_ROOT) -> int:
     path = item_dir(item_id, items_root) / "expected_components.json"
     if not path.is_file():
@@ -865,10 +900,86 @@ def create_item(item_id: str, name: str, description: str = "",
         "golden_set": False,
         "components_count": 0,
         "annotation_status": "pending",
+        "defect_types": list(DEFAULT_DEFECT_TYPES),
     }
     index[item_id] = entry
     _save_items_index(index, items_root)
     return {"id": item_id, **entry}
+
+
+def update_item(item_id: str, *, name: str | None = None,
+                description: str | None = None, revision: str | None = None,
+                defect_types: list[str] | None = None,
+                items_root: Path = ITEMS_ROOT) -> dict[str, Any]:
+    """Update mutable fields of a registry entry; returns the updated entry.
+
+    Only the fields passed as non-None change — the item id (slug), creation
+    timestamp, and cached status fields are never touched. Raises ValueError
+    when the item does not exist.
+    """
+    index = load_items_index(items_root)
+    entry = index.get(item_id)
+    if not isinstance(entry, dict):
+        raise ValueError(f"unknown item id {item_id!r}")
+    if name is not None:
+        entry["name"] = name.strip()
+    if description is not None:
+        entry["description"] = description.strip()
+    if revision is not None:
+        entry["revision"] = revision.strip()
+    if defect_types is not None:
+        entry["defect_types"] = [str(d).strip() for d in defect_types
+                                 if str(d).strip()]
+    index[item_id] = entry
+    _save_items_index(index, items_root)
+    return {"id": item_id, **entry}
+
+
+def delete_item(item_id: str, remove_files: bool = True,
+                items_root: Path = ITEMS_ROOT) -> None:
+    """Remove an item from the registry and (by default) its files on disk.
+
+    A missing registry entry or a missing item directory is tolerated — the
+    goal is the end state. Review & Repair records in results/ are never
+    touched: they keep their item tag and display as archived.
+    """
+    index = load_items_index(items_root)
+    if item_id in index:
+        del index[item_id]
+        _save_items_index(index, items_root)
+    if remove_files:
+        shutil.rmtree(item_dir(item_id, items_root), ignore_errors=True)
+
+
+def _rewrite_learned_defect_type(item_id: str, old: str, new: str,
+                                 items_root: Path = ITEMS_ROOT) -> int | None:
+    """Best-effort rename of a defect type inside the item's learned ledger.
+
+    Returns the number of ledger entries rewritten, or None when the ledger
+    could not be read/written (the caller keeps the catalog change and warns).
+    Atomic-ish: the new ledger is written to a temp file and moved over the
+    original, so a crash mid-write never leaves a truncated ledger. The
+    filename matches similarity_engine.ITEM_LEDGER_NAME ("learned.jsonl").
+    """
+    ledger = item_dir(item_id, items_root) / "learned.jsonl"
+    if not ledger.is_file():
+        return 0
+    try:
+        records = _read_jsonl(ledger)
+        changed = 0
+        for rec in records:
+            if rec.get("defect_type") == old:
+                rec["defect_type"] = new
+                changed += 1
+        if not changed:
+            return 0
+        tmp = ledger.with_suffix(".jsonl.tmp")
+        tmp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n"
+                               for r in records), encoding="utf-8")
+        tmp.replace(ledger)
+        return changed
+    except Exception:  # noqa: BLE001 - best-effort; caller warns
+        return None
 
 
 def write_item_expected_components(item_id: str,
@@ -925,7 +1036,7 @@ def _item_cfg_override(cfg: dict[str, Any], item_id: str,
 
 
 # ---------------------------------------------------------------------------
-# Page 1: Inspection & Training — mode toggle: Inspection / Training
+# Page 1: Production — mode toggle: Inspection / Training
 # ---------------------------------------------------------------------------
 
 def _page_item_selector() -> None:
@@ -971,7 +1082,7 @@ def _page_item_selector() -> None:
 
 
 def page_inspection_training(cfg: dict[str, Any]) -> None:
-    st.header("Inspection & Training")
+    st.header("Production")
     _page_item_selector()
     mode = st.radio("Mode", ["Inspection", "Training"], horizontal=True,
                     key="inspection_training_mode")
@@ -1016,7 +1127,8 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
             st.warning(
                 f"⚠️ Active item `{active_item}` is no longer in the registry "
                 f"(data/items/index.json) — switch the Active item in the "
-                f"sidebar or re-onboard it via BUILD · ➕ Create New."
+                f"sidebar or re-onboard it via BUILD · Inspection Item "
+                f"Maintenance."
             )
             return
         from similarity_engine import gallery_counts  # noqa: PLC0415
@@ -1122,6 +1234,7 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
             # new image, old verdict/judgment stale
             st.session_state.pop("inspection", None)
             st.session_state.pop("sim_judgment", None)
+            st.session_state.pop("pending_reject", None)
 
     current = st.session_state.get("inspection_snapshot")
     demo_fallback = demo_image is not None and demo_image.is_file()
@@ -1143,7 +1256,8 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
             )
         if st.button("🗑 Clear", key="inspection_clear"):
             for key in ("inspection_snapshot", "_insp_seen_camera",
-                        "_insp_seen_upload", "inspection", "sim_judgment"):
+                        "_insp_seen_upload", "inspection", "sim_judgment",
+                        "pending_reject"):
                 st.session_state.pop(key, None)
             st.rerun()
         align_first = st.checkbox(
@@ -1340,11 +1454,13 @@ def _write_sim_verdict_record(cfg: dict[str, Any],
 
 
 def _resolve_sim_verdict_record(cfg: dict[str, Any], board_id: str,
-                                label: str) -> None:
+                                label: str,
+                                defect_type: str | None = None) -> None:
     """Mark a similarity review record resolved with the final human label.
 
     Missing/corrupt JSON is skipped silently — the feedback.jsonl entry
-    remains the record of last resort.
+    remains the record of last resort. When the human label came with a
+    defect type (REJECT popup), it is recorded on the verdict JSON too.
     """
     path = _results_dir(cfg) / f"{board_id}_verdict.json"
     if not path.is_file():
@@ -1357,6 +1473,8 @@ def _resolve_sim_verdict_record(cfg: dict[str, Any], board_id: str,
         return
     data["verdict"] = "OK" if label == "accept" else "NG"
     data["operator_label"] = label
+    if defect_type:
+        data["defect_type"] = defect_type
     data["resolved"] = True
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -1373,6 +1491,11 @@ def _similarity_inspection(cfg: dict[str, Any], item_id: str,
     data/items/<id>/feedback/ so learned prototypes stay on disk.
     """
     from similarity_engine import judge  # noqa: PLC0415
+
+    # A REJECT click on a previous run queues a pending payload; the
+    # defect-type popup opens first and decides how the learning proceeds.
+    if st.session_state.get("pending_reject", {}).get("kind") == "sim":
+        _reject_defect_type_dialog(cfg)
 
     st.caption(
         f"Judge source: similarity learning "
@@ -1438,12 +1561,20 @@ def _similarity_inspection(cfg: dict[str, Any], item_id: str,
             if st.button("✅ Correct", use_container_width=True,
                          key="sim_correct"):
                 label = "accept" if verdict == "ACCEPT" else "reject"
-                _sim_learn_and_log(cfg, state, label, verdict, confirmed=True)
+                if label == "reject":
+                    _queue_pending_reject("sim", state, verdict, True)
+                else:
+                    _sim_learn_and_log(cfg, state, label, verdict,
+                                       confirmed=True)
         with col_wrong:
             if st.button("❌ Wrong — flip & learn", use_container_width=True,
                          key="sim_wrong"):
                 label = "reject" if verdict == "ACCEPT" else "accept"
-                _sim_learn_and_log(cfg, state, label, verdict, confirmed=False)
+                if label == "reject":
+                    _queue_pending_reject("sim", state, verdict, False)
+                else:
+                    _sim_learn_and_log(cfg, state, label, verdict,
+                                       confirmed=False)
     else:  # REVIEW — the engine refuses to guess; the human teaches it.
         st.markdown("**Human review needed — label this capture:**")
         col_a, col_r = st.columns(2)
@@ -1455,33 +1586,35 @@ def _similarity_inspection(cfg: dict[str, Any], item_id: str,
         with col_r:
             if st.button("❌ Reject", use_container_width=True,
                          key="sim_reject"):
-                _sim_learn_and_log(cfg, state, "reject", verdict,
-                                   confirmed=False)
+                _queue_pending_reject("sim", state, verdict, False)
 
 
 def _sim_learn_and_log(cfg: dict[str, Any], state: dict[str, Any],
                        label: str, auto_verdict: str,
-                       confirmed: bool) -> None:
+                       confirmed: bool,
+                       defect_type: str | None = None) -> None:
     """learn() with the confirmed/corrected label + feedback-ledger entry."""
     from similarity_engine import learn  # noqa: PLC0415
 
     try:
-        out = learn(state["path"], label, state["item_id"])
+        out = learn(state["path"], label, state["item_id"],
+                    defect_type=defect_type)
     except Exception as exc:  # noqa: BLE001 - operator UI must not crash
         st.error(f"Learning failed: {exc}")
         return
-    _append_feedback(
-        _results_dir(cfg),
-        {"board_id": Path(state["path"]).stem,
-         "mark": "sim_confirm" if confirmed else "sim_override",
-         "reason": (f"similarity auto verdict {auto_verdict}; "
-                    f"human label {label}"),
-         "item": state["item_id"]},
-    )
+    feedback = {"board_id": Path(state["path"]).stem,
+                "mark": "sim_confirm" if confirmed else "sim_override",
+                "reason": (f"similarity auto verdict {auto_verdict}; "
+                           f"human label {label}"),
+                "item": state["item_id"]}
+    if defect_type:
+        feedback["defect_type"] = defect_type
+    _append_feedback(_results_dir(cfg), feedback)
     # Resolve the matching Review & Repair record with the final human label.
     # Best-effort: a file error must not make the learning itself look failed.
     try:
-        _resolve_sim_verdict_record(cfg, Path(state["path"]).stem, label)
+        _resolve_sim_verdict_record(cfg, Path(state["path"]).stem, label,
+                                    defect_type=defect_type)
     except Exception as exc:  # noqa: BLE001 - review record is best-effort
         st.warning(f"⚠️ Learned, but the review record could not be "
                    f"updated: {exc}")
@@ -1489,6 +1622,110 @@ def _sim_learn_and_log(cfg: dict[str, Any], state: dict[str, Any],
         "Learned — similar images will be judged accordingly. "
         f"Gallery now: {out['ok']} accepted / {out['ng']} rejected examples."
     )
+    st.rerun()
+
+
+# --- REJECT → defect-type popup (Production page) ----------------------------
+# Any operator action whose final human label is "reject" queues a
+# session_state["pending_reject"] payload and reruns; at the top of the
+# relevant flow the modal opens and decides how the learning proceeds. The
+# payload survives ×-closing the dialog (it re-opens on the next rerun) and
+# is cleared together with the underlying judgment (new snapshot / 🗑 Clear /
+# item switch) or by either dialog button.
+
+def _queue_pending_reject(kind: str, state: dict[str, Any],
+                          auto_verdict: str, confirmed: bool) -> None:
+    """Store the pending-reject payload and rerun into the defect-type popup.
+
+    kind "sim": state is the sim_judgment dict (path/result/item_id).
+    kind "training": state carries the training-mode resume context
+    (training_pending path, session id, variant).
+    """
+    st.session_state["pending_reject"] = {
+        "kind": kind,
+        "state": state,
+        "auto_verdict": auto_verdict,
+        "confirmed": confirmed,
+    }
+    st.rerun()
+
+
+@st.dialog("Why is this rejected?")
+def _reject_defect_type_dialog(cfg: dict[str, Any]) -> None:
+    """Modal that collects the defect type before learning a REJECT label.
+
+    "Save & learn" proceeds with the picked defect type; "Learn without
+    defect type" proceeds with None. Anything failing on disk surfaces as a
+    warning/error inside the dialog — the Production flow must never crash.
+    """
+    pending = st.session_state.get("pending_reject")
+    if not pending:
+        return
+    item_id = pending["state"].get("item_id")
+    defect_type = st.selectbox(
+        "Defect type", item_defect_types(item_id),
+        key="reject_defect_pick",
+        help="Pick the closest match. This list is maintained per item under "
+             "BUILD · Inspection Item Maintenance → Modification.",
+    )
+    col_save, col_skip = st.columns(2)
+    with col_save:
+        if st.button("Save & learn", type="primary",
+                     use_container_width=True, key="reject_save"):
+            _finish_pending_reject(cfg, pending, defect_type)
+    with col_skip:
+        if st.button("Learn without defect type", use_container_width=True,
+                     key="reject_skip"):
+            _finish_pending_reject(cfg, pending, None)
+
+
+def _finish_pending_reject(cfg: dict[str, Any], pending: dict[str, Any],
+                           defect_type: str | None) -> None:
+    """Resume the queued REJECT action with (or without) a defect type."""
+    st.session_state.pop("pending_reject", None)
+    if pending.get("kind") == "training":
+        _training_reject_learn(pending["state"], defect_type)
+    else:
+        _sim_learn_and_log(cfg, pending["state"], "reject",
+                           pending["auto_verdict"], pending["confirmed"],
+                           defect_type=defect_type)
+
+
+def _training_reject_learn(state: dict[str, Any],
+                           defect_type: str | None) -> None:
+    """Apply the queued training-mode NG label with (or without) defect type.
+
+    Mirrors the OK path: collision-safe copy into boards_ng + ledger line
+    (defect_type/refdes recorded only when present), then teach the
+    similarity engine — learning failures never break labeling.
+    """
+    data_root = PROJECT_ROOT / "data"
+    pending_path = Path(state["pending_path"])
+    if not pending_path.is_file():  # capture vanished while the popup was open
+        st.session_state.pop("training_pending", None)
+        st.warning("The pending capture is no longer on disk — nothing was "
+                   "learned.")
+        st.rerun()
+        return
+    extra: dict[str, Any] = {"session": state["session_id"],
+                             "variant": state["variant"],
+                             "origin": "training_mode"}
+    if defect_type:
+        extra["defect_type"] = defect_type
+    if state.get("refdes"):
+        extra["refdes"] = state["refdes"]
+    dest = label_image(pending_path, "NG", data_root,
+                       session_tag=f"{state['session_id']}_{state['variant']}",
+                       ledger_extra=extra)
+    try:
+        from similarity_engine import learn  # noqa: PLC0415
+
+        learn(dest, "reject", state.get("item_id"), defect_type=defect_type)
+    except Exception:  # noqa: BLE001 - learning must never break labeling
+        pass
+    st.session_state.pop("training_pending", None)
+    st.session_state["training_last_save"] = (
+        f"NG → {dest.name} — ready for the next board.")
     st.rerun()
 
 
@@ -1557,7 +1794,14 @@ def _resolved_run_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
 def _training_mode(cfg: dict[str, Any]) -> None:
     """Capture-time OK/NG labeling from the browser webcam (st.camera_input —
     works on cloud and local) or a single-image upload. Uses the SAME labeling
-    helpers/ledger as the Dataset Review page, with extended ledger fields."""
+    helpers/ledger as the Dataset Review page, with extended ledger fields.
+    NG labels first collect a defect type via the "Why is this rejected?"
+    popup (pending_reject in session_state)."""
+    # A REJECT click on a previous run queues a pending payload; the
+    # defect-type popup opens first and decides how the learning proceeds.
+    if st.session_state.get("pending_reject", {}).get("kind") == "training":
+        _reject_defect_type_dialog(cfg)
+
     data_root = PROJECT_ROOT / "data"
     ledger_path = _labels_ledger_path(data_root)
     session_id = st.session_state["training_session_id"]
@@ -1613,25 +1857,27 @@ def _training_mode(cfg: dict[str, Any]) -> None:
         st.image(str(pending_path), caption=f"Pending — {pending_path.name}",
                  use_container_width=True)
 
-        defect_type = st.selectbox(
-            "Defect type (for NG)",
-            ["missing part", "wrong part", "other", "unspecified"],
-            index=3,
-            help="Recorded with NG labels only; ignored for OK.",
-        )
         refdes = st.text_input(
             "Reference designator (e.g. R7)", key="training_refdes",
             help="Optional — recorded with NG labels only.",
         )
+        st.caption("NG labels ask for a defect type in a popup before "
+                   "learning (the list is maintained per item under BUILD · "
+                   "Inspection Item Maintenance → Modification).")
 
-        def _apply_training_label(label: str) -> None:
+        # Everything the NG popup needs to resume this label after a rerun.
+        tm_state = {
+            "pending_path": str(pending_path),
+            "session_id": session_id,
+            "variant": variant,
+            "item_id": st.session_state.get("active_item"),
+            "refdes": refdes.strip(),
+        }
+
+        def _apply_training_label_ok() -> None:
             extra: dict[str, Any] = {"session": session_id, "variant": variant,
                                      "origin": "training_mode"}
-            if label == "NG":
-                extra["defect_type"] = defect_type
-                if refdes.strip():
-                    extra["refdes"] = refdes.strip()
-            dest = label_image(pending_path, label, data_root,
+            dest = label_image(pending_path, "OK", data_root,
                                session_tag=f"{session_id}_{variant}",
                                ledger_extra=extra)
             # Every training label also teaches the similarity engine
@@ -1641,25 +1887,25 @@ def _training_mode(cfg: dict[str, Any]) -> None:
             try:
                 from similarity_engine import learn  # noqa: PLC0415
 
-                learn(dest, "accept" if label == "OK" else "reject",
-                      st.session_state.get("active_item"))
+                learn(dest, "accept", st.session_state.get("active_item"))
             except Exception:  # noqa: BLE001 - learning must never break labeling
                 pass
             st.session_state.pop("training_pending", None)
             st.session_state["training_last_save"] = (
-                f"{label} → {dest.name} — ready for the next board.")
+                f"OK → {dest.name} — ready for the next board.")
 
         col_ok, col_ng, col_retake = st.columns([3, 3, 2])
         with col_ok:
             st.markdown('<span class="aoi-ok-btn"></span>', unsafe_allow_html=True)
             if st.button("✅ OK", use_container_width=True, key="training_ok"):
-                _apply_training_label("OK")
+                _apply_training_label_ok()
                 st.rerun()
         with col_ng:
             st.markdown('<span class="aoi-ng-btn"></span>', unsafe_allow_html=True)
             if st.button("❌ NG", use_container_width=True, key="training_ng"):
-                _apply_training_label("NG")
-                st.rerun()
+                # NG = a human REJECT label: collect the defect type first;
+                # the popup resumes via _training_reject_learn.
+                _queue_pending_reject("training", tm_state, "MANUAL", False)
         with col_retake:
             if st.button("↺ Retake", use_container_width=True, key="training_retake"):
                 pending_path.unlink(missing_ok=True)  # discard the unlabeled capture
@@ -1762,6 +2008,7 @@ def _review_record(vf: Path) -> dict[str, Any] | None:
         "reason": data.get("reason"),
         "resolved": data.get("resolved"),
         "operator_label": data.get("operator_label"),
+        "defect_type": data.get("defect_type"),
     }
 
 
@@ -1796,7 +2043,7 @@ def page_history(cfg: dict[str, Any]) -> None:
     ) if results_dir.is_dir() else []
 
     if not verdict_files:
-        st.caption("No inspections yet — run your first board on the Inspection & Training page.")
+        st.caption("No inspections yet — run your first board on the Production page.")
         return
 
     records = [r for vf in verdict_files if (r := _review_record(vf)) is not None]
@@ -1867,6 +2114,8 @@ def page_history(cfg: dict[str, Any]) -> None:
             )
             if choice.get("reason"):
                 st.caption(f"Engine reason: {choice['reason']}")
+            if choice.get("defect_type"):
+                st.caption(f"Defect type recorded: **{choice['defect_type']}**")
             if choice.get("resolved"):
                 op = choice.get("operator_label") or "?"
                 mapped_auto = _SIM_TO_REVIEW_VERDICT.get(
@@ -1882,7 +2131,7 @@ def page_history(cfg: dict[str, Any]) -> None:
                 )
             else:
                 st.caption("Awaiting operator confirmation on the "
-                           "Inspection & Training page.")
+                           "Production page.")
 
     st.markdown("**Mark for model improvement** — appends to `results/feedback.jsonl`:")
     col_fr, col_fa = st.columns(2)
@@ -1997,7 +2246,7 @@ def page_settings(config_path: Path, cfg: dict[str, Any]) -> None:
             st.error(f"Save failed: {exc}")
 
     st.caption(
-        "Sample-image test: use the Inspection & Training page with a known NG board from "
+        "Sample-image test: use the Production page with a known NG board from "
         "data/boards_ng to preview threshold effects before saving."
     )
 
@@ -2051,7 +2300,7 @@ def page_labeling() -> None:
     st.caption(
         "Bulk dataset maintenance: import image batches or webcam sessions, fix "
         "labels, and export the labeled dataset. Capture-time labeling (camera "
-        "→ OK/NG in one click) lives on the **Inspection & Training** page in "
+        "→ OK/NG in one click) lives on the **Production** page in "
         "Training mode."
     )
     st.caption(
@@ -2306,8 +2555,12 @@ def page_dataset(cfg: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Page: ➕ Create New (BUILD) — item-onboarding wizard
+# Page: Inspection Item Maintenance (BUILD) — onboarding wizard + modification
 # ---------------------------------------------------------------------------
+# Engineer/Admin only (BUILD is hidden from Operators by ROLE_SECTIONS; the
+# role check below is defense in depth). Two sections: "Create New" is the
+# 4-step item-onboarding wizard; "Modification" maintains the defect-type
+# catalog and the item itself (edit fields / delete).
 # Sequential wizard driven by a session_state step counter (st.steps does not
 # exist in streamlit 1.41 — this is the lightweight replacement). All cn_*
 # keys are cleared by _cn_reset, so Cancel / "start another" always restarts
@@ -2316,6 +2569,204 @@ def page_dataset(cfg: dict[str, Any]) -> None:
 
 CN_STEPS = ["Item info", "Capture good boards", "Choose the golden board",
             "Expected components"]
+
+
+def page_item_maintenance() -> None:
+    st.header("Inspection Item Maintenance")
+    if st.session_state.get("role") == "Operator":
+        st.warning("Inspection item maintenance is an Engineer/Admin task — "
+                   "switch role in the sidebar if you need it.")
+        return
+    section = st.radio("Section", ["Create New", "Modification"],
+                       horizontal=True, key="im_section")
+    if section == "Create New":
+        page_create_new()
+    else:
+        _modification_section()
+
+
+def _modification_section() -> None:
+    """Maintain one registered item: defect-type catalog + edit/delete."""
+    items = list_items()
+    if not items:
+        st.caption("No inspection items registered yet — create one in the "
+                   "Create New section first.")
+        return
+
+    notice = st.session_state.pop("im_notice", None)
+    if notice:
+        kind, msg = notice
+        (st.warning if kind == "warning" else st.success)(msg)
+
+    picked = st.selectbox(
+        "Inspection item", items, key="im_modify_pick",
+        format_func=lambda it: f"{it.get('name') or it['id']} (`{it['id']}`)",
+    )
+    item_id = picked["id"]
+
+    # --- defect-type catalog -------------------------------------------------
+    st.subheader("Defect types")
+    catalog = item_defect_types(item_id)
+    st.caption("Current catalog: " + " · ".join(f"`{d}`" for d in catalog))
+    st.caption("Operators pick from this list in the \"Why is this "
+               "rejected?\" popup on the Production page.")
+    dt_action = st.radio("Action", ["Add defect type", "Modify defect type",
+                                    "Delete defect type"],
+                         horizontal=True, key=f"im_dt_action_{item_id}")
+    if dt_action == "Add defect type":
+        _im_add_defect_type(item_id, catalog)
+    elif dt_action == "Modify defect type":
+        _im_modify_defect_type(item_id, catalog)
+    else:
+        _im_delete_defect_type(item_id, catalog)
+
+    # --- item fields + danger zone -------------------------------------------
+    st.subheader("Item")
+    _im_modify_item(picked)
+    _im_delete_item(picked)
+
+
+def _defect_type_error(catalog: list[str], candidate: str,
+                       ignore: str | None = None) -> str | None:
+    """None when `candidate` may join the catalog, else the reason why not."""
+    cand = candidate.strip()
+    if not cand:
+        return "The defect type name cannot be empty."
+    if any(c.casefold() == cand.casefold() for c in catalog
+           if ignore is None or c != ignore):
+        return f"“{cand}” is already in the catalog."
+    return None
+
+
+def _im_notice(kind: str, msg: str) -> None:
+    """Success/warning that survives the rerun after a catalog/item change."""
+    st.session_state["im_notice"] = (kind, msg)
+    st.rerun()
+
+
+def _im_add_defect_type(item_id: str, catalog: list[str]) -> None:
+    new_dt = st.text_input("New defect type", key=f"im_dt_add_{item_id}",
+                           placeholder="e.g. Solder bridge")
+    if st.button("Add defect type", key=f"im_dt_add_btn_{item_id}"):
+        err = _defect_type_error(catalog, new_dt)
+        if err:
+            st.error(err)
+            return
+        update_item(item_id, defect_types=[*catalog, new_dt.strip()])
+        _im_notice("success", f"Added defect type “{new_dt.strip()}”.")
+
+
+def _im_modify_defect_type(item_id: str, catalog: list[str]) -> None:
+    old = st.selectbox("Defect type to rename", catalog,
+                       key=f"im_dt_mod_pick_{item_id}")
+    new_name = st.text_input("New name", key=f"im_dt_mod_name_{item_id}",
+                             placeholder=old)
+    st.caption("Learned examples using this defect type are renamed too; "
+               "Review & Repair history keeps the text recorded at the time.")
+    if st.button("Rename defect type", key=f"im_dt_mod_btn_{item_id}"):
+        err = _defect_type_error(catalog, new_name, ignore=old)
+        if err:
+            st.error(err)
+            return
+        new_dt = new_name.strip()
+        update_item(item_id,
+                    defect_types=[new_dt if d == old else d for d in catalog])
+        rewritten = _rewrite_learned_defect_type(item_id, old, new_dt)
+        if rewritten is None:
+            _im_notice("warning",
+                       f"Renamed “{old}” to “{new_dt}” in the catalog, but "
+                       "the learned-examples ledger could not be rewritten — "
+                       "learned examples keep the old name.")
+        _im_notice("success",
+                   f"Renamed defect type “{old}” to “{new_dt}”"
+                   + (f" ({rewritten} learned example(s) updated)."
+                      if rewritten else "."))
+
+
+def _im_delete_defect_type(item_id: str, catalog: list[str]) -> None:
+    doomed = st.selectbox("Defect type to delete", catalog,
+                          key=f"im_dt_del_pick_{item_id}")
+    st.caption("Only the catalog entry is removed — learned examples and "
+               "Review & Repair history keep their recorded label.")
+    confirm = st.checkbox(
+        f"I understand this removes “{doomed}” from the catalog.",
+        key=f"im_dt_del_confirm_{item_id}")
+    if st.button("Delete defect type", disabled=not confirm,
+                 key=f"im_dt_del_btn_{item_id}"):
+        update_item(item_id,
+                    defect_types=[d for d in catalog if d != doomed])
+        _im_notice("success", f"Deleted defect type “{doomed}”.")
+
+
+def _im_modify_item(item: dict[str, Any]) -> None:
+    item_id = item["id"]
+    with st.expander("Modify item"):
+        st.caption(f"The item id `{item_id}` never changes — it keys the "
+                   "registry, the files on disk, and the inspection history.")
+        name = st.text_input("Item name", value=item.get("name") or "",
+                             key=f"im_item_name_{item_id}")
+        description = st.text_area("Description",
+                                   value=item.get("description") or "",
+                                   key=f"im_item_desc_{item_id}")
+        revision = st.text_input("Revision", value=item.get("revision") or "",
+                                 key=f"im_item_rev_{item_id}")
+        if st.button("Save item changes", key=f"im_item_save_{item_id}"):
+            if not name.strip():
+                st.error("The item name cannot be empty.")
+                return
+            update_item(item_id, name=name, description=description,
+                        revision=revision)
+            _im_notice("success", f"Item `{item_id}` updated.")
+
+
+def _im_delete_item(item: dict[str, Any]) -> None:
+    item_id = item["id"]
+    with st.expander("⚠ Delete item (danger zone)"):
+        idir = item_dir(item_id)
+        n_golden = 1 if (idir / "golden_board.jpg").is_file() else 0
+        n_captures = _count_images(idir / "captures")
+        n_feedback = _count_images(idir / "feedback")
+        # learned.jsonl = similarity_engine.ITEM_LEDGER_NAME
+        n_learned = len(_read_jsonl(idir / "learned.jsonl"))
+        st.markdown(
+            f"Deleting **{item.get('name') or item_id}** (`{item_id}`) "
+            f"removes its registry entry and `data/items/{item_id}/` — "
+            f"{n_golden} golden image, {n_captures} capture(s), "
+            f"{n_feedback} feedback image(s), {n_learned} learned example(s)."
+        )
+        st.caption("Inspection records in Review & Repair are kept and will "
+                   "show the item as archived.")
+        confirm = st.checkbox(
+            "I understand this permanently deletes the item and its files.",
+            key=f"im_del_confirm_{item_id}")
+        # Red danger button — same marker-span CSS pattern as the OK/NG
+        # labeling buttons (icon + text still carry the meaning without CSS).
+        st.markdown(
+            "<style>"
+            ".stElementContainer:has(.aoi-danger-btn) + .stElementContainer "
+            f"button{{background-color:{COLOR_NG};border-color:{COLOR_NG};"
+            "color:#fff;}"
+            "</style>",
+            unsafe_allow_html=True,
+        )
+        st.markdown('<span class="aoi-danger-btn"></span>',
+                    unsafe_allow_html=True)
+        if st.button("🗑 Delete this item permanently", disabled=not confirm,
+                     key=f"im_del_btn_{item_id}"):
+            try:
+                delete_item(item_id)
+            except Exception as exc:  # noqa: BLE001 - show, never crash
+                st.error(f"Delete failed: {exc}")
+                return
+            if st.session_state.get("active_item") == item_id:
+                # Deferred sidebar-widget update (see _pending_active_item in
+                # main()): reset the Active item to the default demo board and
+                # drop any judgment/popup state tied to the deleted item.
+                st.session_state["_pending_active_item"] = None
+                st.session_state.pop("active_item", None)
+                st.session_state.pop("sim_judgment", None)
+                st.session_state.pop("pending_reject", None)
+            _im_notice("success", f"Item `{item_id}` deleted.")
 
 
 def _cn_reset() -> None:
@@ -2539,7 +2990,7 @@ def _create_new_success(item_id: str) -> None:
     st.markdown(
         "**Next steps to make this item inspectable:**\n"
         "1. Select it as the **Active item** in the sidebar.\n"
-        "2. Capture 50–100 boards in **Inspection & Training → Training** mode "
+        "2. Capture 50–100 boards in **Production → Training** mode "
         f"(Board variant defaults to `{item_id}`).\n"
         "3. Annotate components (docs/data_collection_guide.md · Dataset "
         f"Review) and fill `data/items/{item_id}/expected_components.json`.\n"
@@ -2570,7 +3021,7 @@ def page_dashboard(cfg: dict[str, Any]) -> None:
     records = _load_verdict_records(results_dir)
     if not records:
         st.info(
-            "No inspections yet — run your first board on the **Inspection & Training** "
+            "No inspections yet — run your first board on the **Production** "
             "page and this dashboard will light up."
         )
         return
@@ -2668,7 +3119,7 @@ def page_spc(cfg: dict[str, Any]) -> None:
     results_dir = _results_dir(cfg)
     records = _load_verdict_records(results_dir)
     if not records:
-        st.info("No inspection data yet — run boards on the **Inspection & Training** page first.")
+        st.info("No inspection data yet — run boards on the **Production** page first.")
         return
 
     import pandas as pd  # noqa: PLC0415
@@ -2934,7 +3385,8 @@ def main() -> None:
         st.stop()
 
     # --- active item (golden reference selection) -----------------------------
-    # The demo board is the default; registered items (BUILD · ➕ Create New)
+    # The demo board is the default; registered items (BUILD · Inspection
+    # Item Maintenance)
     # override golden.image / golden.expected_components IN MEMORY (mirroring
     # the demo-cfg pattern) — configs/pipeline.yaml is never rewritten.
     items = list_items()
@@ -2958,14 +3410,19 @@ def main() -> None:
              "repoints golden.image / golden.expected_components in memory.",
     )
     active_item = items[pick - 1]["id"] if pick > 0 else None
-    if active_item != prev_active and active_item:
-        # Training mode's Board variant follows the newly selected item.
-        st.session_state["training_variant"] = active_item
+    if active_item != prev_active:
+        # An item switch invalidates any pending auto-judgment / REJECT popup
+        # for the previous item.
+        st.session_state.pop("sim_judgment", None)
+        st.session_state.pop("pending_reject", None)
+        if active_item:
+            # Training mode's Board variant follows the newly selected item.
+            st.session_state["training_variant"] = active_item
     st.session_state["active_item"] = active_item
     if active_item:
         cfg = _item_cfg_override(cfg, active_item)
 
-    if page == "Inspection & Training":
+    if page == "Production":
         page_inspection_training(cfg)
     elif page == "Review & Repair":
         page_history(cfg)
@@ -2975,8 +3432,8 @@ def main() -> None:
         page_spc(cfg)
     elif page == "Dataset Review":
         page_labeling()
-    elif page == "➕ Create New":
-        page_create_new()
+    elif page == "Inspection Item Maintenance":
+        page_item_maintenance()
     elif page == "Dataset & Training":
         page_dataset(cfg)
     elif page == "Audit Trail":
