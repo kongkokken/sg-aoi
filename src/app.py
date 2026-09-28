@@ -927,15 +927,51 @@ def _item_cfg_override(cfg: dict[str, Any], item_id: str,
 # Page 1: Inspection & Training — mode toggle: Inspection / Training
 # ---------------------------------------------------------------------------
 
+def _page_item_selector() -> None:
+    """On-page item selector, synced with the sidebar 'Active item'.
+
+    Both widgets share session_state['active_item']. Because the sidebar
+    selectbox is instantiated BEFORE the page renders, a change made here is
+    deferred via '_pending_active_item' and applied at the top of main() on
+    the next run (Streamlit forbids modifying an already-instantiated widget
+    key). Operators get a read-only view — item switching is an
+    Engineer/Admin action.
+    """
+    items = list_items()
+    options: list[str | None] = [None] + [it["id"] for it in items]
+
+    def _fmt(iid: str | None) -> str:
+        if iid is None:
+            return DEFAULT_ITEM_LABEL
+        it = get_item(iid) or {"id": iid}
+        return f"{it.get('name') or iid} (`{iid}`)"
+
+    current = st.session_state.get("active_item")
+    idx = options.index(current) if current in options else 0
+    if st.session_state.get("role") == "Operator":
+        st.selectbox(
+            "Item under inspection", options, index=idx, format_func=_fmt,
+            disabled=True, key="page_item_pick_ro",
+            help="Operators inspect the active item; an Engineer/Admin can "
+                 "switch it here or in the sidebar.",
+        )
+        return
+    pick = st.selectbox(
+        "Item under inspection", options, index=idx, format_func=_fmt,
+        key="page_item_pick",
+        help="Synced with the sidebar 'Active item' — changing one updates "
+             "the other. The default (demo board) uses configs/pipeline.yaml; "
+             "a registered item is auto-judged by the similarity learning "
+             "engine from its golden board + your accept/reject feedback.",
+    )
+    if pick != current:
+        st.session_state["_pending_active_item"] = pick
+        st.rerun()
+
+
 def page_inspection_training(cfg: dict[str, Any]) -> None:
     st.header("Inspection & Training")
-    active_item = st.session_state.get("active_item")
-    if active_item:
-        item = get_item(active_item) or {"id": active_item}
-        st.markdown(
-            f"**Active item:** {item.get('name') or active_item} "
-            f"(`{active_item}`) — {item_status(item)}"
-        )
+    _page_item_selector()
     mode = st.radio("Mode", ["Inspection", "Training"], horizontal=True,
                     key="inspection_training_mode")
 
@@ -965,11 +1001,14 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
     a verdict-source indicator (trained model / demo / precomputed JSON).
     """
 
-    # --- fail-safe: an active item whose component list is not annotated yet ---
-    # The wizard captures the golden board first; verdicts would compare
-    # against an EMPTY expected-components list, so instead of a misleading
-    # run the page degrades to an explicit amber state (ui_design.md §5).
+    # --- fail-safe: an active item with NOTHING learned and no component list ---
+    # Similarity learning (docs/concept_revision.md) replaces the old
+    # "setup pending" dead-end: an item becomes judgeable purely from its
+    # golden board + captures + user accept/reject feedback, with NO
+    # component annotation. The amber setup-pending state only remains when
+    # the galleries are completely empty AND the rule engine is not set up.
     active_item = st.session_state.get("active_item")
+    sim_counts: dict[str, int] | None = None
     if active_item:
         item = get_item(active_item)
         if item is None:
@@ -979,29 +1018,46 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
                 f"sidebar or re-onboard it via BUILD · ➕ Create New."
             )
             return
-        if item_status(item) != "ready":
+        from similarity_engine import gallery_counts  # noqa: PLC0415
+
+        sim_counts = gallery_counts(active_item)
+        galleries_empty = sim_counts["ok"] == 0 and sim_counts["ng"] == 0
+        if item_status(item) != "ready" and galleries_empty:
             has_golden = (item_dir(active_item) / "golden_board.jpg").is_file()
             _verdict_banner(
                 "SETUP PENDING",
                 f"Item {item.get('name') or active_item} — "
-                + ("golden captured, component list not yet annotated"
+                + ("golden captured, nothing learned yet"
                    if has_golden else "no golden board captured yet"),
                 COLOR_WARN,
             )
             st.warning(
-                "⚠️ Verdicts are disabled for this item: the rule engine "
-                "compares against `expected_components.json`, which is still "
-                "empty. Next steps: capture 50–100 boards in **Training** "
-                "mode with this variant → annotate components (see "
-                "docs/data_collection_guide.md) → fill "
+                "⚠️ Nothing to judge against yet. Fastest path: label a few "
+                "captures in **Training** mode (✅ OK / ❌ NG) — every label "
+                "teaches the similarity engine, and this item becomes "
+                "auto-judgeable as soon as it has learned at least 1 "
+                "accepted AND 1 rejected example. Optional advanced path: "
+                "annotate components (docs/data_collection_guide.md) → fill "
                 f"`data/items/{active_item}/expected_components.json` → "
-                "train & deploy the detector."
+                "train & deploy the PP-YOLOE+ detector for ref-des-level "
+                "proof."
             )
             return
 
+    # Auto-judge path: any non-demo item with at least one learned example is
+    # judged by the similarity engine FIRST (judge() itself degrades to
+    # REVIEW while the galleries are one-sided).
+    sim_flow = bool(
+        active_item and sim_counts
+        and (sim_counts["ok"] + sim_counts["ng"]) > 0
+    )
+
     # --- demo mode (simulated detections, no trained model) -------------------
+    # Untouched for the default (demo) board. When a real item is being
+    # auto-judged by the similarity engine, the scripted demo scenarios would
+    # only confuse — so they stay out of the way.
     demo_image: Path | None = None
-    demo_on = _demo_active()
+    demo_on = _demo_active() and not sim_flow
     if demo_on:
         st.info(
             "🧪 **DEMO MODE — simulated detections (no trained model).** "
@@ -1022,7 +1078,8 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
     source_kind, source_label = _detection_source(cfg, demo_active=demo_on)
 
     # Explicit degradation banners (ui_design.md §5) — amber, never silent.
-    if not det_ready:
+    # Irrelevant (and misleading) while the similarity engine is the judge.
+    if not det_ready and not sim_flow:
         st.info(
             "⚠️ Detection model not trained/exported — Branch A checks "
             "(missing / wrong part) will be skipped and the verdict is NOT "
@@ -1061,7 +1118,9 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
                 "bytes": capture.getbuffer().tobytes(),
                 "origin": origin,
             }
-            st.session_state.pop("inspection", None)  # new image, old verdict stale
+            # new image, old verdict/judgment stale
+            st.session_state.pop("inspection", None)
+            st.session_state.pop("sim_judgment", None)
 
     current = st.session_state.get("inspection_snapshot")
     demo_fallback = demo_image is not None and demo_image.is_file()
@@ -1083,7 +1142,7 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
             )
         if st.button("🗑 Clear", key="inspection_clear"):
             for key in ("inspection_snapshot", "_insp_seen_camera",
-                        "_insp_seen_upload", "inspection"):
+                        "_insp_seen_upload", "inspection", "sim_judgment"):
                 st.session_state.pop(key, None)
             st.rerun()
         align_first = st.checkbox(
@@ -1104,6 +1163,9 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
     # --- Step 2: run -----------------------------------------------------------
     st.subheader("2. Inspection")
     have_image = bool(current) or demo_fallback
+    if sim_flow:
+        _similarity_inspection(cfg, active_item, current, sim_counts)
+        return
     if not have_image:
         st.info("Take a snapshot (or upload a board image) first.")
     elif st.button("🔍 Inspection", type="primary", use_container_width=True):
@@ -1229,6 +1291,121 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
 
     with st.expander("Raw verdict JSON"):
         st.json(json.loads(json.dumps(asdict(verdict))))
+
+
+def _similarity_inspection(cfg: dict[str, Any], item_id: str,
+                           current: dict[str, Any] | None,
+                           counts: dict[str, int]) -> None:
+    """Auto-judge flow for non-demo items (docs/concept_revision.md).
+
+    🔍 Inspection runs similarity_engine.judge() FIRST: ACCEPT / REJECT /
+    REVIEW banner with confidence + human-readable reason, then the
+    confirm/override loop — every correction (and confirmation) is learned,
+    so the galleries grow with use. The judged snapshot is kept under
+    data/items/<id>/feedback/ so learned prototypes stay on disk.
+    """
+    from similarity_engine import judge  # noqa: PLC0415
+
+    st.caption(
+        f"Judge source: similarity learning "
+        f"({counts['ok']} ok / {counts['ng']} ng examples learned)"
+    )
+    if not current:
+        st.info("Take a snapshot (or upload an image) first.")
+        return
+    if st.button("🔍 Inspection", type="primary", use_container_width=True):
+        with st.spinner("Comparing with learned examples…"):
+            try:
+                fb_dir = item_dir(item_id) / "feedback"
+                fb_dir.mkdir(parents=True, exist_ok=True)
+                suffix = Path(current["name"]).suffix.lower()
+                if suffix not in IMAGE_EXTENSIONS:
+                    suffix = ".jpg"
+                judged_path = fb_dir / _collision_safe_name(
+                    fb_dir, f"judge_{datetime.now():%Y%m%d_%H%M%S}{suffix}")
+                judged_path.write_bytes(current["bytes"])
+                result = judge(judged_path, item_id)
+                st.session_state["sim_judgment"] = {
+                    "result": result, "path": str(judged_path),
+                    "item_id": item_id,
+                }
+            except Exception as exc:  # noqa: BLE001 - operator UI must not crash
+                st.error(f"Auto-judge failed: {exc}")
+                return
+
+    state = st.session_state.get("sim_judgment")
+    if not state or state.get("item_id") != item_id:
+        st.caption("Press **🔍 Inspection** to auto-judge the current snapshot.")
+        return
+    result = state["result"]
+    verdict = result["verdict"]
+    color = {"ACCEPT": COLOR_OK, "REJECT": COLOR_NG}.get(verdict, COLOR_WARN)
+    _verdict_banner(
+        verdict,
+        f"Confidence {result['confidence']:.0%} — {result['reason']}",
+        color,
+    )
+    st.caption(
+        f"Judge source: similarity learning "
+        f"({result['n_ok']} ok / {result['n_ng']} ng examples learned)"
+    )
+
+    # --- verdict confirm/override = learning (ui_design.md §13) --------------
+    if state.get("resolved"):
+        st.success(state["resolved"])
+        return
+    if verdict in ("ACCEPT", "REJECT"):
+        st.markdown("**Was this judgment correct?**")
+        col_ok, col_wrong = st.columns(2)
+        with col_ok:
+            if st.button("✅ Correct", use_container_width=True,
+                         key="sim_correct"):
+                label = "accept" if verdict == "ACCEPT" else "reject"
+                _sim_learn_and_log(cfg, state, label, verdict, confirmed=True)
+        with col_wrong:
+            if st.button("❌ Wrong — flip & learn", use_container_width=True,
+                         key="sim_wrong"):
+                label = "reject" if verdict == "ACCEPT" else "accept"
+                _sim_learn_and_log(cfg, state, label, verdict, confirmed=False)
+    else:  # REVIEW — the engine refuses to guess; the human teaches it.
+        st.markdown("**Human review needed — label this capture:**")
+        col_a, col_r = st.columns(2)
+        with col_a:
+            if st.button("✅ Accept", use_container_width=True,
+                         key="sim_accept"):
+                _sim_learn_and_log(cfg, state, "accept", verdict,
+                                   confirmed=False)
+        with col_r:
+            if st.button("❌ Reject", use_container_width=True,
+                         key="sim_reject"):
+                _sim_learn_and_log(cfg, state, "reject", verdict,
+                                   confirmed=False)
+
+
+def _sim_learn_and_log(cfg: dict[str, Any], state: dict[str, Any],
+                       label: str, auto_verdict: str,
+                       confirmed: bool) -> None:
+    """learn() with the confirmed/corrected label + feedback-ledger entry."""
+    from similarity_engine import learn  # noqa: PLC0415
+
+    try:
+        out = learn(state["path"], label, state["item_id"])
+    except Exception as exc:  # noqa: BLE001 - operator UI must not crash
+        st.error(f"Learning failed: {exc}")
+        return
+    _append_feedback(
+        _results_dir(cfg),
+        {"board_id": Path(state["path"]).stem,
+         "mark": "sim_confirm" if confirmed else "sim_override",
+         "reason": (f"similarity auto verdict {auto_verdict}; "
+                    f"human label {label}"),
+         "item": state["item_id"]},
+    )
+    state["resolved"] = (
+        "Learned — similar images will be judged accordingly. "
+        f"Gallery now: {out['ok']} accepted / {out['ng']} rejected examples."
+    )
+    st.rerun()
 
 
 def _align_snapshot_in_place(input_path: Path, golden_path: str | None,
@@ -1373,6 +1550,17 @@ def _training_mode(cfg: dict[str, Any]) -> None:
             dest = label_image(pending_path, label, data_root,
                                session_tag=f"{session_id}_{variant}",
                                ledger_extra=extra)
+            # Every training label also teaches the similarity engine
+            # (docs/concept_revision.md): OK -> accept, NG -> reject. The
+            # default (demo board) scopes to boards_ok/boards_ng; a
+            # registered item gets its own learned ledger.
+            try:
+                from similarity_engine import learn  # noqa: PLC0415
+
+                learn(dest, "accept" if label == "OK" else "reject",
+                      st.session_state.get("active_item"))
+            except Exception:  # noqa: BLE001 - learning must never break labeling
+                pass
             st.session_state.pop("training_pending", None)
             st.session_state["training_last_save"] = (
                 f"{label} → {dest.name} — ready for the next board.")
@@ -1405,6 +1593,16 @@ def _training_mode(cfg: dict[str, Any]) -> None:
     cols[1].metric("❌ NG (this session)", counts["NG"])
     cols[2].metric("boards_ok total", _count_images(data_root / "boards_ok"))
     cols[3].metric("boards_ng total", _count_images(data_root / "boards_ng"))
+    try:
+        from similarity_engine import gallery_counts  # noqa: PLC0415
+
+        gc = gallery_counts(st.session_state.get("active_item"))
+        st.caption(
+            f"Learning gallery: {gc['ok']} accepted / {gc['ng']} rejected "
+            "examples — every OK/NG label above grows it."
+        )
+    except Exception:  # noqa: BLE001 - informational line must never crash
+        pass
 
     # --- golden board capture -----------------------------------------------------
     with st.expander("⚠ Capture as golden board"):
@@ -2254,11 +2452,24 @@ def page_dashboard(cfg: dict[str, Any]) -> None:
     st.subheader("Station status")
     status = _model_status(cfg)
     w_ok, _ = _results_writable(results_dir)
+    # Similarity learning stat (docs/concept_revision.md) — cheap filesystem
+    # count, no embeddings computed here.
+    active_item = st.session_state.get("active_item")
+    try:
+        from similarity_engine import gallery_counts  # noqa: PLC0415
+
+        gc = gallery_counts(active_item)
+        scope = ((get_item(active_item) or {}).get("name") or active_item
+                 if active_item else "Default (demo board)")
+        sim_status = f"{scope}: {gc['ok']} ok / {gc['ng']} ng learned"
+    except Exception:  # noqa: BLE001 - informational row must not crash
+        sim_status = "unavailable"
     st.dataframe(
         [
             {"item": "Pipeline config", "status": "✅ loaded"},
             {"item": "Demo mode",
              "status": "🧪 ON — simulated detections" if _demo_active() else "off"},
+            {"item": "Similarity learning (auto-judge)", "status": sim_status},
             {"item": "Detection model",
              "status": ("✅ ready" if status["detection_ready"]
                         else "❌ not exported")},
@@ -2487,6 +2698,20 @@ def main() -> None:
     )
     _inject_brand_css()
 
+    # Apply an item switch requested by the on-page selector LAST run —
+    # must happen BEFORE the sidebar 'Active item' widget below is
+    # (re)instantiated (Streamlit forbids touching a live widget key).
+    if "_pending_active_item" in st.session_state:
+        pending_item = st.session_state.pop("_pending_active_item")
+        pending_ids: list[str | None] = [None] + [
+            it["id"] for it in list_items()
+        ]
+        if pending_item in pending_ids:
+            st.session_state["active_item_pick"] = pending_ids.index(pending_item)
+            st.session_state["active_item"] = pending_item
+            if pending_item:
+                st.session_state["training_variant"] = pending_item
+
     # --- branded sidebar header -------------------------------------------------
     if LOGO_LIGHT.is_file():
         st.sidebar.image(str(LOGO_LIGHT), width=180)
@@ -2501,6 +2726,7 @@ def main() -> None:
              "Operator sees RUN only, Engineer adds MONITOR + BUILD, "
              "Admin sees everything.",
     )
+    st.session_state["role"] = role  # pages read this (e.g. item selector)
     allowed = ROLE_SECTIONS[role]
     options: list[str] = []
     for section, pages in NAV_SECTIONS:

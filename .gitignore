@@ -15,6 +15,8 @@ data/labels.jsonl
 # Item onboarding runtime data (golden boards, captures, registry index).
 data/items/*
 !data/items/.gitkeep
+# Similarity-engine feature caches for the default scope (regenerable).
+data/.sim_cache/
 data/boards_ok/*
 data/boards_ng/*
 !data/boards_ok/.gitkeep

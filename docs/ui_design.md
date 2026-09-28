@@ -538,3 +538,41 @@ empty, Inspection mode renders an amber "SETUP PENDING" banner instead of
 running verdicts against an empty reference. System Check gains an
 informational "Items registered: N (M ready)" row that is never red (0 items
 is normal — the demo board is the default).
+
+---
+
+## 13. Auto-judge + confirm/override learning loop (implemented 2026-09-28)
+
+Item-agnostic concept revision (docs/concept_revision.md): for any
+registered (non-demo) item, the **similarity learning engine** is the
+default judge — no component annotation or trained model required.
+
+- **On-page item selector** at the top of Inspection & Training, synced with
+  the sidebar **Active item** (shared `session_state["active_item"]`; the
+  page defers through `_pending_active_item` because the sidebar widget is
+  instantiated first). Operators see it read-only; Engineer/Admin can switch
+  from either place.
+- **Auto-judge**: 🔍 Inspection runs `similarity_engine.judge()` FIRST and
+  renders the standard full-width verdict banner — **ACCEPT** green
+  `#22c55e`, **REJECT** red `#ef4444`, **REVIEW** amber `#f59e0b` — with
+  confidence % and a human-readable reason naming the nearest prototype,
+  plus a *"Judge source: similarity learning (N ok / M ng examples
+  learned)"* line (extends the §11 detection-source indicator). REVIEW is
+  the honest state for ambiguous captures and for one-sided galleries
+  (< 1 accepted or < 1 rejected learned).
+- **Confirm/override = learning**: under the banner, "Was this judgment
+  correct?" with **✅ Correct / ❌ Wrong — flip & learn** (on REVIEW:
+  "label this capture: ✅ Accept / ❌ Reject"). Both paths call
+  `learn()` with the confirmed/corrected label, append to
+  `results/feedback.jsonl` (`sim_confirm` / `sim_override`), and confirm:
+  *"Learned — similar images will be judged accordingly."*
+- **Training mode feeds the same brain**: the OK/NG buttons additionally
+  call `learn()` (OK → accept, NG → reject); a caption shows *"Learning
+  gallery: N accepted / M rejected examples"*.
+- The amber **SETUP PENDING** dead-end (§12) now only appears when the
+  item's galleries are completely empty; its hint points to Training-mode
+  labeling as the fastest path to judgeability.
+- The **default (demo board)** is untouched: demo scenarios, precomputed
+  JSON, and a trained PP-YOLOE+ model keep their existing precedence.
+- Dashboard station status gains a cheap "Similarity learning
+  (auto-judge): <item> — N ok / M ng learned" row.

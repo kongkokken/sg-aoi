@@ -1,11 +1,16 @@
 # PCBA AOI with AI (scaled-down starter)
 
-A hobbyist-scale Automated Optical Inspection (AOI) pipeline for classifying
-assembled PCBs as **OK / NG**.
+A hobbyist-scale Automated Optical Inspection (AOI) app that learns to judge
+**any item** from golden pictures and operator accept/reject feedback —
+starting with assembled PCBs classified as **OK / NG**. The default brain is
+a per-item **similarity learning engine** (see `docs/concept_revision.md`):
+capture a golden example, label a few accepts/rejects, and the app
+auto-judges new captures. The PCBA-specific pipeline below remains as the
+advanced path when component-level (ref-des) proof is needed.
 
-**Phase 1 scope (current): detect MISSING PARTS and WRONG PARTS on the
-component side of a through-hole (PTH) PCBA** — nothing else. The pipeline is
-built around one branch:
+**Phase 1 scope (advanced PCBA path): detect MISSING PARTS and WRONG PARTS
+on the component side of a through-hole (PTH) PCBA** — nothing else. The
+pipeline is built around one branch:
 
 - **Branch A — Object detection** (PaddleDetection **PP-YOLOE+**, Apache 2.0)
   finds every component (resistor, capacitor, diode, IC, connector, ...) with
