@@ -36,23 +36,45 @@ advanced path** for when reference-designator-level proof is required.
   the folder default). For the default/demo scope: `data/golden/` +
   `data/boards_ok/` (accepted), `data/boards_ng/` (rejected), ledger in
   `data/.sim_cache/`.
-- **Embedding.** Canonical 256×256 resize, then four L2-normalized weighted
-  blocks: HSV color histogram (global color), raw 8×8 grayscale grid moments
-  (position-sensitive layout), **sorted** grid moments + grayscale quantiles
-  (position-*invariant* defect signature — a dark blob/missing part changes
-  the distribution tails wherever it sits; heaviest weight), and a HOG-style
-  Sobel gradient-orientation grid (structure). Deterministic, numpy + cv2
-  only, ~9 ms/image on CPU — no torch/anomalib/paddle, cloud-safe.
+- **Embedding (item identity only).** Canonical 256×256 resize, then four
+  L2-normalized weighted blocks: HSV color histogram (global color), raw 8×8
+  grayscale grid moments (position-sensitive layout), **sorted** grid
+  moments + grayscale quantiles (position-*invariant* texture signature),
+  and a HOG-style Sobel gradient-orientation grid (structure).
+  Deterministic, numpy + cv2 only, ~9 ms/image on CPU — no
+  torch/anomalib/paddle, cloud-safe. The embedding answers "is this the
+  item?" — measured on the demo board, same-item captures (with or without
+  defects) sit at cosine distances of ~3e-5–1e-2, alien images at
+  ~0.15–0.20. It is **not** the defect detector: a defect covering ~0.2% of
+  the pixels moves it by only ~3e-5, and position-sensitive blocks push
+  *different* defects *apart* (two different defects measured 3× farther
+  from each other than each is from the golden board), so embedding-only
+  scoring false-accepts unseen defects.
 - **Cache.** `data/items/<id>/features.npz` (default scope:
-  `data/.sim_cache/default.npz`) stores paths + mtimes + labels + vectors;
-  only new/changed files are re-embedded (mtime check).
-- **Scoring.** Cosine distance to the nearest accepted prototype (`d_ok`)
-  vs nearest rejected (`d_ng`); margin score `(d_ng − d_ok)/(d_ng + d_ok)`.
-  ACCEPT ≥ +0.10, REJECT ≤ −0.10, else REVIEW. Galleries with < 1 accepted
-  or < 1 rejected example **always REVIEW** — the engine refuses to guess
-  before it has seen both sides. Confidence = similarity to the nearest
-  winning prototype. Reasons name the prototype ("Very similar to a
-  rejected capture '…' from 2026-09-28 (distance 0.03)").
+  `data/.sim_cache/default.npz`) stores a format `version` plus paths +
+  mtimes + labels + vectors + per-entry learned-anomaly values
+  (`anomalies`, `anomaly_refs`). Only new/changed files are re-embedded
+  (mtime check); stale-version caches rebuild from scratch; anomaly values
+  are recomputed gallery-wide whenever the entry set changes.
+- **Scoring — two stages.** *Stage 1 (identity gate):* cosine distance to
+  the nearest accepted prototype must be ≤ `IDENTITY_GATE = 0.05`, else
+  REVIEW ("capture does not resemble this item"). *Stage 2 (aligned local
+  anomaly — the defect mechanism):* both images go to 512×512 blurred
+  grayscale, small camera translation is compensated via
+  `cv2.phaseCorrelate` (> 0.5 px → `warpAffine`), absdiff is pooled into
+  per-cell means over a 24×24 grid, and the capture's `anomaly` is the
+  hottest cell's mean (0–255 scale) with its `hot_region` reported. The
+  reject threshold is **learned from the gallery**: accepted entries
+  score leave-one-out against their nearest *other* accepted entry,
+  rejected entries against their nearest accepted entry, and
+  `T = max(12, (max_accepted + min_rejected) / 2)` — the floor keeps
+  sensor/JPEG noise from ever triggering REJECT. Verdict: `A ≥ T×1.15` →
+  REJECT, `A ≤ T/1.15` → ACCEPT, between → REVIEW. Galleries with < 1
+  accepted or < 1 rejected example **always REVIEW** — the engine refuses
+  to guess before it has seen both sides. Confidence is a deterministic
+  separation-from-boundary value; reasons state the why ("Localized
+  difference vs accepted reference '…' (strength 25 at region row 9 col 7;
+  learned reject threshold 17 from 2 accepted / 1 rejected…)").
 
 ## Where each piece lives
 
@@ -75,17 +97,21 @@ galleries are completely empty.
 
 ## Honest limitations
 
-- **Appearance-level similarity only.** The engine answers "does this look
-  like things you accepted or things you rejected?" It cannot name a missing
-  reference designator, cannot prove *which* part is wrong, and cannot
-  explain a defect beyond "similar to this earlier capture".
+- **Appearance-level similarity + local differencing only.** The engine
+  answers "is this the item, and does any small region differ from the
+  golden references more than learned rejects did?" It cannot name a
+  missing reference designator, cannot prove *which* part is wrong, and
+  explains a defect only as "strength N at region row R col C, similar in
+  spirit to this earlier rejected capture".
 - **Controlled rig still required.** Fixed camera, fixed lighting, fixed
-  seating. The embedding tolerates noise and small variations, not a
-  different viewpoint or illumination change — a lighting shift looks like a
-  defect.
+  seating. Stage 2 compensates **small translations** via phase
+  correlation, but rotation, scale, and viewpoint changes are NOT
+  corrected — the item must sit in a fixed mount. A lighting shift still
+  looks like a defect.
 - **Cold start is honest, not magic.** With < 1 accepted or < 1 rejected
-  example every verdict is REVIEW; early judgments near the boundary are
-  REVIEW by design. The operator's first corrections are the training data.
+  example every verdict is REVIEW; judgments inside the ±15% dead band
+  around the learned threshold are REVIEW by design. The operator's first
+  corrections are the training data.
 - **Not a replacement for component-level inspection.** When ref-des-level
   proof is needed ("R7 missing", "C3 wrong part"), the PP-YOLOE+ detector +
   rule engine + `expected_components.json` remains the right tool — it is
