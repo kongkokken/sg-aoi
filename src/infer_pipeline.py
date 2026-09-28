@@ -496,12 +496,20 @@ def inspect_board(image_path: Path, cfg: dict[str, Any]) -> tuple[Verdict, np.nd
     return verdict, annotated
 
 
-def save_outputs(verdict: Verdict, annotated: np.ndarray, cfg: dict[str, Any]) -> None:
+def save_outputs(verdict: Verdict, annotated: np.ndarray, cfg: dict[str, Any],
+                 extra: dict[str, Any] | None = None) -> None:
+    """Persist the verdict JSON + annotated image.
+
+    ``extra`` keys (e.g. item_id / item_name / source tagging from the app)
+    are merged into the serialized verdict dict; existing keys are never
+    renamed, so legacy records keep parsing unchanged.
+    """
     out_dir = Path(cfg["output"].get("results_dir", "results"))
     out_dir.mkdir(parents=True, exist_ok=True)
     if cfg["output"].get("save_json", True):
         (out_dir / f"{verdict.board_id}_verdict.json").write_text(
-            json.dumps(asdict(verdict), indent=2), encoding="utf-8"
+            json.dumps({**asdict(verdict), **(extra or {})}, indent=2),
+            encoding="utf-8"
         )
     if cfg["output"].get("save_annotated", True):
         cv2.imwrite(str(out_dir / f"{verdict.board_id}_annotated.jpg"), annotated)

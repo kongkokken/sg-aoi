@@ -98,6 +98,18 @@ Rules:
 └────────────────────────────────────────────────────────────────────┘
 ```
 
+- First filter is **Item under inspection** ("All items" default; legacy
+  records without item fields show under "Default (demo board)"; records
+  whose item was de-registered appear as "<name> (archived)" so history
+  never becomes unreachable). It is a local review filter — it does not
+  change the sidebar "Active item".
+- Each `results/*_verdict.json` record may carry `item_id` / `item_name` /
+  `source` (`detector` | `similarity`). Similarity-learning judgments are
+  written with the raw capture as the annotated image, `auto_verdict` +
+  `confidence` + `reason` from the engine, and `resolved: false`; when the
+  operator confirms or overrides, the record is updated with the final
+  `operator_label` and `resolved: true` (verdict = human label OK/NG).
+
 ### 2.3 Model & threshold settings screen
 
 ```

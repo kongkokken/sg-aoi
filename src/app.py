@@ -287,6 +287,7 @@ def _load_verdict_records(results_dir: Path) -> list[dict[str, Any]]:
             "board_id": data.get("board_id", vf.stem.replace("_verdict", "")),
             "verdict": data.get("verdict", "?"),
             "defects": data.get("defects", []) or [],
+            "item_id": data.get("item_id"),  # legacy records: None (demo board)
         })
     records.sort(key=lambda r: r["time"])
     return records
@@ -1197,7 +1198,15 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
                 # Persist immediately so Review History sees it (no extra click).
                 from infer_pipeline import save_outputs  # noqa: PLC0415
 
-                save_outputs(verdict, annotated, run_cfg)
+                insp_item = st.session_state.get("active_item")
+                insp_name = (
+                    (get_item(insp_item) or {}).get("name") or insp_item
+                    if insp_item else DEFAULT_ITEM_LABEL
+                )
+                save_outputs(verdict, annotated, run_cfg,
+                             extra={"item_id": insp_item,
+                                    "item_name": insp_name,
+                                    "source": "detector"})
             except Exception as exc:  # noqa: BLE001 - operator UI must not crash
                 st.error(f"Pipeline failed: {exc}")
                 return
@@ -1293,6 +1302,65 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
         st.json(json.loads(json.dumps(asdict(verdict))))
 
 
+_SIM_TO_REVIEW_VERDICT = {"ACCEPT": "OK", "REJECT": "NG", "REVIEW": "REVIEW"}
+
+
+def _write_sim_verdict_record(cfg: dict[str, Any],
+                              judgment: dict[str, Any]) -> None:
+    """Persist one similarity judgment as a Review & Repair record.
+
+    Writes results/<board_id>_verdict.json (board_id = judged file stem) so
+    auto-judged captures show up next to detector verdicts, and copies the
+    judged capture to results/<board_id>_annotated.jpg — this flow has no
+    annotated overlay, so the raw capture is what the reviewer inspects.
+    """
+    judged_path = Path(judgment["path"])
+    board_id = judged_path.stem
+    result = judgment["result"]
+    item_id = judgment["item_id"]
+    item_name = (get_item(item_id) or {}).get("name") or item_id
+    results_dir = _results_dir(cfg)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "board_id": board_id,
+        "verdict": _SIM_TO_REVIEW_VERDICT.get(result["verdict"], "REVIEW"),
+        "defects": [],
+        "source": "similarity",
+        "item_id": item_id,
+        "item_name": item_name,
+        "auto_verdict": result["verdict"],
+        "confidence": result.get("confidence"),
+        "reason": result.get("reason", ""),
+        "resolved": False,
+    }
+    (results_dir / f"{board_id}_verdict.json").write_text(
+        json.dumps(record, indent=2), encoding="utf-8")
+    (results_dir / f"{board_id}_annotated.jpg").write_bytes(
+        judged_path.read_bytes())
+
+
+def _resolve_sim_verdict_record(cfg: dict[str, Any], board_id: str,
+                                label: str) -> None:
+    """Mark a similarity review record resolved with the final human label.
+
+    Missing/corrupt JSON is skipped silently — the feedback.jsonl entry
+    remains the record of last resort.
+    """
+    path = _results_dir(cfg) / f"{board_id}_verdict.json"
+    if not path.is_file():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return
+    except Exception:  # noqa: BLE001 - skip corrupt records, keep going
+        return
+    data["verdict"] = "OK" if label == "accept" else "NG"
+    data["operator_label"] = label
+    data["resolved"] = True
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 def _similarity_inspection(cfg: dict[str, Any], item_id: str,
                            current: dict[str, Any] | None,
                            counts: dict[str, int]) -> None:
@@ -1332,6 +1400,15 @@ def _similarity_inspection(cfg: dict[str, Any], item_id: str,
             except Exception as exc:  # noqa: BLE001 - operator UI must not crash
                 st.error(f"Auto-judge failed: {exc}")
                 return
+        # Make the judgment visible in Review & Repair: one *_verdict.json
+        # (source "similarity", resolved=false until the operator confirms)
+        # plus the judged capture as the *_annotated.jpg (no overlay exists
+        # in this flow). A file error must never crash the operator UI.
+        try:
+            _write_sim_verdict_record(cfg, st.session_state["sim_judgment"])
+        except Exception as exc:  # noqa: BLE001 - review record is best-effort
+            st.warning(f"⚠️ Judgment done, but the review record could not "
+                       f"be written: {exc}")
 
     state = st.session_state.get("sim_judgment")
     if not state or state.get("item_id") != item_id:
@@ -1401,6 +1478,13 @@ def _sim_learn_and_log(cfg: dict[str, Any], state: dict[str, Any],
                     f"human label {label}"),
          "item": state["item_id"]},
     )
+    # Resolve the matching Review & Repair record with the final human label.
+    # Best-effort: a file error must not make the learning itself look failed.
+    try:
+        _resolve_sim_verdict_record(cfg, Path(state["path"]).stem, label)
+    except Exception as exc:  # noqa: BLE001 - review record is best-effort
+        st.warning(f"⚠️ Learned, but the review record could not be "
+                   f"updated: {exc}")
     state["resolved"] = (
         "Learned — similar images will be judged accordingly. "
         f"Gallery now: {out['ok']} accepted / {out['ng']} rejected examples."
@@ -1649,6 +1733,61 @@ def _training_mode(cfg: dict[str, Any]) -> None:
 # Page 2: Review & Repair (was "Review History")
 # ---------------------------------------------------------------------------
 
+def _review_record(vf: Path) -> dict[str, Any] | None:
+    """Parse one results/*_verdict.json into a review row; None if corrupt.
+
+    Legacy records (detector flow before item tagging) carry no item fields:
+    item_id is None and the row displays DEFAULT_ITEM_LABEL. Similarity
+    records add auto_verdict/confidence/reason/resolved/operator_label.
+    """
+    try:
+        data = json.loads(vf.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - skip corrupt records, keep browsing
+        return None
+    if not isinstance(data, dict):
+        return None
+    defects = data.get("defects", []) or []
+    return {
+        "file": vf,
+        "time": datetime.fromtimestamp(vf.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        "board_id": data.get("board_id", vf.stem.replace("_verdict", "")),
+        "item_id": data.get("item_id"),  # legacy records: None (demo board)
+        "item": data.get("item_name") or DEFAULT_ITEM_LABEL,
+        "verdict": data.get("verdict", "?"),
+        "defects": len(defects),
+        "types": ", ".join(sorted({d.get("type", "?") for d in defects})) or "—",
+        "source": data.get("source", "detector"),
+        "auto_verdict": data.get("auto_verdict"),
+        "confidence": data.get("confidence"),
+        "reason": data.get("reason"),
+        "resolved": data.get("resolved"),
+        "operator_label": data.get("operator_label"),
+    }
+
+
+def _item_filter_options(
+        records: list[dict[str, Any]],
+        ) -> tuple[list[str | None], dict[str | None, str]]:
+    """(option keys, key→label) for the Review & Repair item filter.
+
+    Keys: None = demo board, then every registered item id, then any item_id
+    seen in records but no longer registered — labelled "(archived)" so
+    history never becomes unreachable. ("All items" is added by the caller.)
+    """
+    registered = {it["id"]: it.get("name") or it["id"] for it in list_items()}
+    options: list[str | None] = [None]
+    labels: dict[str | None, str] = {None: DEFAULT_ITEM_LABEL}
+    for iid, name in registered.items():
+        options.append(iid)
+        labels[iid] = name
+    for r in records:
+        iid = r["item_id"]
+        if iid and iid not in labels:
+            options.append(iid)
+            labels[iid] = f"{r['item'] or iid} (archived)"
+    return options, labels
+
+
 def page_history(cfg: dict[str, Any]) -> None:
     st.header("Review & Repair")
     results_dir = _results_dir(cfg)
@@ -1660,39 +1799,45 @@ def page_history(cfg: dict[str, Any]) -> None:
         st.caption("No inspections yet — run your first board on the Inspection & Training page.")
         return
 
-    records: list[dict[str, Any]] = []
-    for vf in verdict_files:
-        try:
-            data = json.loads(vf.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001 - skip corrupt records, keep browsing
-            continue
-        defects = data.get("defects", [])
-        records.append({
-            "file": vf,
-            "time": datetime.fromtimestamp(vf.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-            "board_id": data.get("board_id", vf.stem.replace("_verdict", "")),
-            "verdict": data.get("verdict", "?"),
-            "defects": len(defects),
-            "types": ", ".join(sorted({d.get("type", "?") for d in defects})) or "—",
-        })
+    records = [r for vf in verdict_files if (r := _review_record(vf)) is not None]
 
-    col1, col2, col3 = st.columns([1, 2, 2])
+    # --- filters: item first (local review filter — does NOT touch the
+    # sidebar 'Active item'), then verdict / defect type / board id search.
+    col0, col1, col2, col3 = st.columns([2, 1, 2, 2])
+    with col0:
+        item_options, item_labels = _item_filter_options(records)
+        item_filter = st.selectbox(
+            "Item under inspection",
+            ["__all__", *item_options],
+            format_func=lambda k: ("All items" if k == "__all__"
+                                   else item_labels.get(k, str(k))),
+            help="Local review filter only — it does not change the active "
+                 "item used for inspections (sidebar).",
+        )
     with col1:
-        verdict_filter = st.selectbox("Verdict", ["All", "OK", "NG"])
+        verdict_options = ["All"] + sorted({r["verdict"] for r in records})
+        verdict_filter = st.selectbox("Verdict", verdict_options)
     with col2:
         all_types = sorted({t for r in records for t in r["types"].split(", ") if t != "—"})
         type_filter = st.multiselect("Defect type", all_types)
     with col3:
         search = st.text_input("Search board id")
 
+    item_filtered = [r for r in records
+                     if item_filter == "__all__" or r["item_id"] == item_filter]
     filtered = [
-        r for r in records
+        r for r in item_filtered
         if (verdict_filter == "All" or r["verdict"] == verdict_filter)
         and (not type_filter or any(t in r["types"] for t in type_filter))
         and (not search or search.lower() in r["board_id"].lower())
     ]
+    if not item_filtered and item_filter != "__all__":
+        st.caption(f"No inspections recorded for "
+                   f"{item_labels.get(item_filter, item_filter)} yet.")
     st.dataframe(
-        [{k: v for k, v in r.items() if k != "file"} for r in filtered],
+        [{"time": r["time"], "board_id": r["board_id"], "Item": r["item"],
+          "verdict": r["verdict"], "defects": r["defects"], "types": r["types"]}
+         for r in filtered],
         use_container_width=True,
     )
     if not filtered:
@@ -1711,17 +1856,47 @@ def page_history(cfg: dict[str, Any]) -> None:
     else:
         st.caption("No annotated image stored for this inspection.")
 
+    if choice["source"] == "similarity":
+        with st.expander("Similarity learning judgment", expanded=True):
+            conf = choice.get("confidence")
+            st.caption(
+                f"Source: similarity learning · auto verdict "
+                f"**{choice.get('auto_verdict') or '?'}**"
+                + (f" · confidence {conf:.0%}"
+                   if isinstance(conf, (int, float)) else "")
+            )
+            if choice.get("reason"):
+                st.caption(f"Engine reason: {choice['reason']}")
+            if choice.get("resolved"):
+                op = choice.get("operator_label") or "?"
+                mapped_auto = _SIM_TO_REVIEW_VERDICT.get(
+                    choice.get("auto_verdict") or "")
+                if choice.get("auto_verdict") == "REVIEW":
+                    note = "resolved a REVIEW"
+                else:
+                    note = ("confirmed" if mapped_auto == choice["verdict"]
+                            else "overrode")
+                st.caption(
+                    f"Operator {note} the engine — final label: "
+                    f"**{op}** (verdict now {choice['verdict']})."
+                )
+            else:
+                st.caption("Awaiting operator confirmation on the "
+                           "Inspection & Training page.")
+
     st.markdown("**Mark for model improvement** — appends to `results/feedback.jsonl`:")
     col_fr, col_fa = st.columns(2)
     with col_fr:
         if st.button("Mark FALSE REJECT (was NG, actually OK)", use_container_width=True):
             _append_feedback(results_dir,
-                             {"board_id": choice["board_id"], "mark": "false_reject"})
+                             {"board_id": choice["board_id"], "mark": "false_reject",
+                              "item": choice["item_id"]})
             st.success("Logged as false reject.")
     with col_fa:
         if st.button("Mark FALSE ACCEPT (was OK, actually NG)", use_container_width=True):
             _append_feedback(results_dir,
-                             {"board_id": choice["board_id"], "mark": "false_accept"})
+                             {"board_id": choice["board_id"], "mark": "false_accept",
+                              "item": choice["item_id"]})
             st.success("Logged as false accept.")
 
 

@@ -216,9 +216,10 @@ flows, visual rules, state handling). Pages:
   webcam or an upload (NG defect type + reference designator, session/variant
   tracking, golden-board capture, dataset export). Phase 1 shows Branch A
   findings (missing/wrong part) only.
-- **RUN · Review & Repair** — filterable past verdicts from `results/`,
-  annotated image drill-down, false-reject/false-accept marking into
-  `feedback.jsonl`.
+- **RUN · Review & Repair** — filterable past verdicts from `results/` with
+  an **Item under inspection** filter (item-tagged records from both the
+  detector and the similarity-learning flows), annotated image drill-down,
+  false-reject/false-accept marking into `feedback.jsonl`.
 - **MONITOR · Dashboard** — boards inspected / OK / NG / FPY metric strip,
   daily FPY trend, top-defects Pareto, recent-NG feed with thumbnails,
   station status.
