@@ -219,6 +219,13 @@ flows, visual rules, state handling). Pages:
   station status.
 - **MONITOR · SPC** — date-range filter, FPY trend, defect Pareto by type and
   designator, p-chart with center line and UCL/LCL.
+- **BUILD · ➕ Create New** — item-onboarding wizard: name the product,
+  capture a few verified-good boards (camera or upload), pick the golden
+  board, and register the item under `data/items/<item_id>/` with an honest
+  empty `expected_components.json` template. Registered items become
+  selectable as the sidebar **Active item**, which repoints the golden
+  reference in memory (pipeline.yaml untouched); until components are
+  annotated, inspections for the item show an amber "setup pending" state.
 - **BUILD · Dataset Review** (was "Labeling") — bulk import, relabel, and
   export: mark images OK/NG into `boards_ok`/`boards_ng` with a
   `labels.jsonl` ledger and dataset zip export. Capture-time labeling lives

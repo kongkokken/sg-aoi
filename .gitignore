@@ -12,6 +12,9 @@ data/raw/captures/
 # Labeling-page uploads and output (runtime data; pull the zip export instead).
 data/raw/uploads/
 data/labels.jsonl
+# Item onboarding runtime data (golden boards, captures, registry index).
+data/items/*
+!data/items/.gitkeep
 data/boards_ok/*
 data/boards_ng/*
 !data/boards_ok/.gitkeep

@@ -487,3 +487,54 @@ detections, and — in addition to the demo banner — a caption states:
 "Demo detections are simulated for the demo board layout; the boxes shown
 correspond to the demo scenario, not to objects in your photo." With no
 user snapshot, the scripted demo board image is inspected as before.
+
+## 12. Item onboarding — Create New (implemented 2026-09-28)
+
+"Learning a new item instead of the demo PCBA": the **➕ Create New** page
+(first page of the BUILD section, Engineer + Admin) is a 4-step wizard driven
+by a `session_state` step counter (`cn_step`; `st.steps` does not exist in
+streamlit 1.41, so a lightweight `st.progress` stepper shows "Step N of 4"):
+
+1. **Item info** — required item name plus optional description/revision.
+   The item id is slugified live (lowercase `[a-z0-9-]`, unicode
+   transliterated), shown to the user, and validated for non-empty +
+   uniqueness against the registry.
+2. **Capture good boards** — `st.camera_input` + multi-file uploader feed a
+   pending list in `session_state` (identity markers prevent re-adding the
+   same widget value on rerun); thumbnails render in a 4-wide grid with a
+   per-shot remove button. ≥ 1 shot required, 3–5 recommended. On "Next" the
+   pending shots are written to `data/items/<item_id>/captures/`.
+3. **Choose the golden board** — thumbnail grid + radio over the saved
+   captures; caption: pick the sharpest, best-lit, verified-good board. The
+   choice is copied to `data/items/<item_id>/golden_board.jpg`.
+4. **Expected components (honest)** — `expected_components.json` is written
+   as a template `{"item": <id>, "components": [], "annotation_status":
+   "pending"}` with an explicit explanation that component definitions come
+   from annotation later (docs/data_collection_guide.md · Dataset Review) and
+   that verdicts for this item stay in a "setup pending" state until then.
+   Finish writes the registry entry and shows a success summary with next
+   steps (50–100 Training-mode boards → annotate →
+   notebooks/train_ppyoloe_colab.ipynb → deploy). Cancel/Back work between
+   steps; "Start another item" resets all `cn_*` state.
+
+### Registry and active item
+
+`data/items/index.json` maps each item id to `{name, description, revision,
+created, golden_set, components_count, annotation_status}`; helpers
+(`list_items`, `get_item`, `item_status`, `create_item`,
+`write_item_expected_components`, `refresh_item_registry_entry`) are pure
+functions exercised headlessly by `scripts/test_items.py`. `item_status`
+recomputes from the filesystem — "ready" needs the golden image AND > 0
+components; anything else is "setup pending".
+
+A sidebar **Active item** selectbox (below Pipeline config) lists "Default
+(demo board)" plus all registered items and persists in `session_state`. A
+non-default active item overrides `golden.image` /
+`golden.expected_components` **in memory** (deepcopy, same pattern as demo
+mode — `configs/pipeline.yaml` is never rewritten). The Inspection & Training
+page shows the active item name near the top; Training mode's Board variant
+defaults to the active item id. Fail-safe: while the item's component list is
+empty, Inspection mode renders an amber "SETUP PENDING" banner instead of
+running verdicts against an empty reference. System Check gains an
+informational "Items registered: N (M ready)" row that is never red (0 items
+is normal — the demo board is the default).

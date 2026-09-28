@@ -5,7 +5,8 @@ Ten pages in a sectioned, role-filtered sidebar navigation:
   RUN:            Inspection & Training (mode toggle: Inspection / Training),
                   Review & Repair (was "Review History")
   MONITOR:        Dashboard (FPY / Pareto / NG feed / station status), SPC
-  BUILD:          Dataset Review (was "Labeling"), Dataset & Training
+  BUILD:          ➕ Create New (item onboarding wizard), Dataset Review
+                  (was "Labeling"), Dataset & Training
   ADMINISTRATION: Audit Trail, Settings
   MAINTENANCE:    System Check
   (last)          Setup Wizard
@@ -78,7 +79,7 @@ LINE_NAME = "Season Group · PCBA Line 1"
 NAV_SECTIONS: list[tuple[str, list[str]]] = [
     ("RUN", ["Inspection & Training", "Review & Repair"]),
     ("MONITOR", ["Dashboard", "SPC"]),
-    ("BUILD", ["Dataset Review", "Dataset & Training"]),
+    ("BUILD", ["➕ Create New", "Dataset Review", "Dataset & Training"]),
     ("ADMINISTRATION", ["Audit Trail", "Settings"]),
     ("MAINTENANCE", ["System Check"]),
 ]
@@ -464,6 +465,19 @@ def collect_system_checks(cfg: dict[str, Any] | None,
             "no labels.jsonl yet — normal before the first labeling session",
             "Nothing to do — the ledger is created by Dataset Review or training mode.")
 
+    # 10. registered items (informational — never red; 0 items is normal
+    # because the demo board is the default Active item)
+    try:
+        reg_items = list_items()
+        n_ready = sum(1 for it in reg_items if item_status(it) == "ready")
+        add("Items registered", True,
+            f"{len(reg_items)} ({n_ready} ready)" if reg_items
+            else "0 — default demo board in use",
+            "Nothing to do — onboard new products via BUILD · ➕ Create New.")
+    except Exception as exc:  # noqa: BLE001 - informational row must not crash
+        add("Items registered", True, f"registry unreadable: {exc}",
+            "Check data/items/index.json.")
+
     return rows
 
 
@@ -726,11 +740,202 @@ def save_golden_image(src_path: Path, golden_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Item registry ("➕ Create New" onboarding) — pure functions with no st.*
+# calls, so scripts/test_items.py can exercise them headlessly in a TEMP data
+# dir. Each item is a folder under data/items/<item_id>/ holding its own
+# golden board + expected components + the good-board captures collected
+# during onboarding; data/items/index.json is the registry.
+# ---------------------------------------------------------------------------
+
+ITEMS_ROOT = PROJECT_ROOT / "data" / "items"
+DEFAULT_ITEM_LABEL = "Default (demo board)"
+
+
+def slugify_item_id(name: str) -> str:
+    """Filesystem-safe item id from a display name: lowercase [a-z0-9-].
+
+    Unicode is transliterated (NFKD → ASCII, accents dropped); every other
+    run of non-alphanumeric characters collapses to a single dash; leading /
+    trailing dashes are stripped. May return "" — the caller validates.
+    """
+    import unicodedata  # noqa: PLC0415
+
+    ascii_name = (
+        unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    )
+    return re.sub(r"[^a-z0-9]+", "-", ascii_name.lower()).strip("-")
+
+
+def _items_index_path(items_root: Path) -> Path:
+    return Path(items_root) / "index.json"
+
+
+def load_items_index(items_root: Path = ITEMS_ROOT) -> dict[str, Any]:
+    """The raw registry dict; corrupt/missing JSON reads as empty (never crashes)."""
+    path = _items_index_path(Path(items_root))
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_items_index(index: dict[str, Any], items_root: Path = ITEMS_ROOT) -> Path:
+    items_root = Path(items_root)
+    items_root.mkdir(parents=True, exist_ok=True)
+    path = _items_index_path(items_root)
+    path.write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8")
+    return path
+
+
+def list_items(items_root: Path = ITEMS_ROOT) -> list[dict[str, Any]]:
+    """Registry entries (oldest first), each dict carrying its id in 'id'."""
+    items = [
+        {"id": iid, **(meta if isinstance(meta, dict) else {})}
+        for iid, meta in load_items_index(items_root).items()
+    ]
+    items.sort(key=lambda it: it.get("created", ""))
+    return items
+
+
+def get_item(item_id: str, items_root: Path = ITEMS_ROOT) -> dict[str, Any] | None:
+    if not item_id:
+        return None
+    meta = load_items_index(items_root).get(item_id)
+    if not isinstance(meta, dict):
+        return None
+    return {"id": item_id, **meta}
+
+
+def item_dir(item_id: str, items_root: Path = ITEMS_ROOT) -> Path:
+    return Path(items_root) / item_id
+
+
+def _count_item_components(item_id: str, items_root: Path = ITEMS_ROOT) -> int:
+    path = item_dir(item_id, items_root) / "expected_components.json"
+    if not path.is_file():
+        return 0
+    try:
+        comps = json.loads(path.read_text(encoding="utf-8")).get("components", [])
+    except Exception:  # noqa: BLE001 - corrupt JSON counts as not annotated
+        return 0
+    return len(comps) if isinstance(comps, list) else 0
+
+
+def item_status(item: dict[str, Any], items_root: Path = ITEMS_ROOT) -> str:
+    """'ready' (golden image on disk + >0 annotated components) else
+    'setup pending'.
+
+    Computed from the FILESYSTEM, not the registry's cached counts, so a
+    hand-edited expected_components.json flips the status without
+    re-registering the item.
+    """
+    iid = str(item.get("id", ""))
+    golden = item_dir(iid, items_root) / "golden_board.jpg"
+    if golden.is_file() and _count_item_components(iid, items_root) > 0:
+        return "ready"
+    return "setup pending"
+
+
+def create_item(item_id: str, name: str, description: str = "",
+                revision: str = "", items_root: Path = ITEMS_ROOT) -> dict[str, Any]:
+    """Create the on-disk item profile folder + registry entry.
+
+    Raises ValueError on an empty/invalid id or a duplicate. Does not write
+    the golden image or expected_components.json — those are wizard steps 3/4.
+    """
+    if not item_id:
+        raise ValueError("item id is empty — the name needs at least one "
+                         "letter or digit")
+    if not re.fullmatch(r"[a-z0-9-]+", item_id):
+        raise ValueError(f"invalid item id {item_id!r} — use [a-z0-9-] only")
+    index = load_items_index(items_root)
+    if item_id in index:
+        raise ValueError(f"item id {item_id!r} already exists — pick another name")
+    (item_dir(item_id, items_root) / "captures").mkdir(parents=True, exist_ok=True)
+    entry = {
+        "name": name.strip(),
+        "description": description.strip(),
+        "revision": revision.strip(),
+        "created": datetime.now().isoformat(timespec="seconds"),
+        "golden_set": False,
+        "components_count": 0,
+        "annotation_status": "pending",
+    }
+    index[item_id] = entry
+    _save_items_index(index, items_root)
+    return {"id": item_id, **entry}
+
+
+def write_item_expected_components(item_id: str,
+                                   items_root: Path = ITEMS_ROOT) -> Path:
+    """Template expected_components.json for a freshly onboarded item.
+
+    Honest by construction: an EMPTY component list with
+    annotation_status 'pending' — real component definitions come from
+    annotation later (docs/data_collection_guide.md), and item_status keeps
+    the item in 'setup pending' until then.
+    """
+    path = item_dir(item_id, items_root) / "expected_components.json"
+    path.write_text(
+        json.dumps({"item": item_id, "reference_image": "golden_board.jpg",
+                    "components": [], "annotation_status": "pending"},
+                   indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def refresh_item_registry_entry(item_id: str,
+                                items_root: Path = ITEMS_ROOT) -> None:
+    """Re-sync a registry entry's cached golden_set/components_count from disk."""
+    index = load_items_index(items_root)
+    entry = index.get(item_id)
+    if not isinstance(entry, dict):
+        return
+    entry["golden_set"] = (item_dir(item_id, items_root)
+                           / "golden_board.jpg").is_file()
+    entry["components_count"] = _count_item_components(item_id, items_root)
+    entry["annotation_status"] = (
+        "annotated" if entry["components_count"] > 0 else "pending"
+    )
+    _save_items_index(index, items_root)
+
+
+def _item_cfg_override(cfg: dict[str, Any], item_id: str,
+                       items_root: Path = ITEMS_ROOT) -> dict[str, Any]:
+    """In-memory copy of the pipeline config repointed at the item's golden
+    image + expected components.
+
+    Mirrors _demo_cfg: configs/pipeline.yaml is NEVER rewritten and the base
+    dict is not mutated (deepcopy) — the override lives in memory only.
+    """
+    import copy  # noqa: PLC0415
+
+    item_cfg = copy.deepcopy(cfg)
+    idir = item_dir(item_id, items_root)
+    golden = item_cfg.setdefault("golden", {})
+    golden["image"] = str(idir / "golden_board.jpg")
+    golden["expected_components"] = str(idir / "expected_components.json")
+    return item_cfg
+
+
+# ---------------------------------------------------------------------------
 # Page 1: Inspection & Training — mode toggle: Inspection / Training
 # ---------------------------------------------------------------------------
 
 def page_inspection_training(cfg: dict[str, Any]) -> None:
     st.header("Inspection & Training")
+    active_item = st.session_state.get("active_item")
+    if active_item:
+        item = get_item(active_item) or {"id": active_item}
+        st.markdown(
+            f"**Active item:** {item.get('name') or active_item} "
+            f"(`{active_item}`) — {item_status(item)}"
+        )
     mode = st.radio("Mode", ["Inspection", "Training"], horizontal=True,
                     key="inspection_training_mode")
 
@@ -759,6 +964,40 @@ def _inspection_mode(cfg: dict[str, Any]) -> None:
     renders the verdict banner + annotated image + defect table, always with
     a verdict-source indicator (trained model / demo / precomputed JSON).
     """
+
+    # --- fail-safe: an active item whose component list is not annotated yet ---
+    # The wizard captures the golden board first; verdicts would compare
+    # against an EMPTY expected-components list, so instead of a misleading
+    # run the page degrades to an explicit amber state (ui_design.md §5).
+    active_item = st.session_state.get("active_item")
+    if active_item:
+        item = get_item(active_item)
+        if item is None:
+            st.warning(
+                f"⚠️ Active item `{active_item}` is no longer in the registry "
+                f"(data/items/index.json) — switch the Active item in the "
+                f"sidebar or re-onboard it via BUILD · ➕ Create New."
+            )
+            return
+        if item_status(item) != "ready":
+            has_golden = (item_dir(active_item) / "golden_board.jpg").is_file()
+            _verdict_banner(
+                "SETUP PENDING",
+                f"Item {item.get('name') or active_item} — "
+                + ("golden captured, component list not yet annotated"
+                   if has_golden else "no golden board captured yet"),
+                COLOR_WARN,
+            )
+            st.warning(
+                "⚠️ Verdicts are disabled for this item: the rule engine "
+                "compares against `expected_components.json`, which is still "
+                "empty. Next steps: capture 50–100 boards in **Training** "
+                "mode with this variant → annotate components (see "
+                "docs/data_collection_guide.md) → fill "
+                f"`data/items/{active_item}/expected_components.json` → "
+                "train & deploy the detector."
+            )
+            return
 
     # --- demo mode (simulated detections, no trained model) -------------------
     demo_image: Path | None = None
@@ -1066,8 +1305,13 @@ def _training_mode(cfg: dict[str, Any]) -> None:
     # --- session fields -----------------------------------------------------
     col_variant, col_session = st.columns([2, 1])
     with col_variant:
-        variant = st.text_input("Board variant", value="DEMO-REV-A",
-                                key="training_variant")
+        variant = st.text_input(
+            "Board variant",
+            value=st.session_state.get("active_item") or "DEMO-REV-A",
+            key="training_variant",
+            help="Defaults to the Active item when one is selected in the "
+                 "sidebar; recorded on every label saved in this session.",
+        )
     with col_session:
         st.text_input("Session id", value=session_id, disabled=True,
                       help="Generated once per training-mode entry; recorded on "
@@ -1689,6 +1933,252 @@ def page_dataset(cfg: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Page: ➕ Create New (BUILD) — item-onboarding wizard
+# ---------------------------------------------------------------------------
+# Sequential wizard driven by a session_state step counter (st.steps does not
+# exist in streamlit 1.41 — this is the lightweight replacement). All cn_*
+# keys are cleared by _cn_reset, so Cancel / "start another" always restarts
+# cleanly. Disk layout per item: data/items/<item_id>/{golden_board.jpg,
+# expected_components.json, captures/} + one entry in data/items/index.json.
+
+CN_STEPS = ["Item info", "Capture good boards", "Choose the golden board",
+            "Expected components"]
+
+
+def _cn_reset() -> None:
+    for key in [k for k in st.session_state if k.startswith("cn_")]:
+        st.session_state.pop(key, None)
+
+
+def page_create_new() -> None:
+    st.header("Create New Item")
+    st.caption(
+        "Onboard a new product instead of the demo PCBA: capture a few "
+        "verified-good boards, set the best one as the golden good board, and "
+        "register the item. Component annotation and model training come "
+        "afterwards — the wizard is honest about that."
+    )
+
+    step = int(st.session_state.get("cn_step", 1))
+    done_item = st.session_state.get("cn_done")
+    if done_item:
+        _create_new_success(done_item)
+        return
+    st.progress(step / len(CN_STEPS),
+                text=f"Step {step} of {len(CN_STEPS)} — {CN_STEPS[step - 1]}")
+
+    if step == 1:
+        _cn_step_info()
+    elif step == 2:
+        _cn_step_captures()
+    elif step == 3:
+        _cn_step_golden()
+    else:
+        _cn_step_components()
+
+
+def _cn_nav(show_back: bool, back_to: int, show_cancel: bool = True) -> bool:
+    """Shared Back / Cancel row; returns True if navigation happened."""
+    cols = st.columns(2)
+    if show_back and cols[0].button("← Back", key="cn_back"):
+        st.session_state["cn_step"] = back_to
+        st.rerun()
+    if show_cancel and cols[1].button("✖ Cancel", key="cn_cancel"):
+        _cn_reset()
+        st.rerun()
+    return False
+
+
+def _cn_step_info() -> None:
+    st.subheader("1. Item info")
+    name = st.text_input("Item name *", key="cn_name_input",
+                         placeholder="e.g. Power Supply Rev C",
+                         value=st.session_state.get("cn_name", ""))
+    slug = slugify_item_id(name)
+    if name.strip():
+        if not slug:
+            st.error("The name needs at least one letter or digit to form an item id.")
+        elif get_item(slug) is not None:
+            st.error(f"Item id `{slug}` is already taken — pick another name.")
+        else:
+            st.caption(f"This item will be registered as `{slug}` "
+                       f"under `data/items/{slug}/`.")
+    description = st.text_area("Description (optional)",
+                               value=st.session_state.get("cn_desc", ""),
+                               key="cn_desc_input")
+    revision = st.text_input("Revision (optional)",
+                             value=st.session_state.get("cn_rev", ""),
+                             key="cn_rev_input", placeholder="e.g. Rev C")
+
+    if st.button("Next →", type="primary", key="cn_next_1",
+                 disabled=not (name.strip() and slug)):
+        if get_item(slug) is not None:
+            st.error(f"Item id `{slug}` is already taken — pick another name.")
+            return
+        st.session_state.update(cn_name=name.strip(), cn_desc=description,
+                                cn_rev=revision, cn_item_id=slug, cn_step=2,
+                                cn_pending=[], cn_seen=[])
+        st.rerun()
+    _cn_nav(show_back=False, back_to=1)
+
+
+def _cn_step_captures() -> None:
+    item_id = st.session_state["cn_item_id"]
+    st.subheader(f"2. Capture good boards — `{item_id}`")
+    st.caption(
+        "Capture or upload shots of VERIFIED-GOOD boards only — one of them "
+        "becomes the golden reference in the next step. At least 1 shot is "
+        "required; 3–5 recommended (slightly different angles/lighting)."
+    )
+    pending: list[dict[str, Any]] = st.session_state.setdefault("cn_pending", [])
+    seen: list[tuple[str, int]] = st.session_state.setdefault("cn_seen", [])
+
+    snapshot = st.camera_input("📷 Capture a good board", key="cn_camera")
+    uploads = st.file_uploader(
+        "…or upload good-board images",
+        type=sorted(e.lstrip(".") for e in IMAGE_EXTENSIONS),
+        accept_multiple_files=True, key="cn_upload",
+    )
+    candidates = ([snapshot] if snapshot is not None else []) + list(uploads or [])
+    for capture in candidates:
+        ident = _upload_ident(capture)
+        if ident is not None and ident not in seen:
+            seen.append(ident)
+            pending.append({
+                "name": str(getattr(capture, "name", "capture.jpg")),
+                "bytes": capture.getbuffer().tobytes(),
+            })
+
+    if not pending:
+        st.info("No good-board shots yet — use the camera or uploader above.")
+    else:
+        st.markdown(f"**{len(pending)} shot(s) collected**")
+        per_row = 4
+        for row_start in range(0, len(pending), per_row):
+            cols = st.columns(per_row)
+            for col, idx in zip(cols, range(row_start,
+                                            min(row_start + per_row, len(pending)))):
+                with col:
+                    st.image(pending[idx]["bytes"],
+                             caption=f"#{idx + 1} — {pending[idx]['name']}",
+                             use_container_width=True)
+                    if st.button("🗑 Remove", key=f"cn_remove_{idx}"):
+                        pending.pop(idx)
+                        st.rerun()
+        st.caption("A removed shot stays consumed by the uploader; clear the "
+                   "uploader selection to re-add the same file.")
+
+    if st.button("Next → save captures", type="primary", key="cn_next_2",
+                 disabled=len(pending) < 1):
+        caps_dir = item_dir(item_id) / "captures"
+        caps_dir.mkdir(parents=True, exist_ok=True)
+        for i, shot in enumerate(pending, start=1):
+            suffix = Path(shot["name"]).suffix.lower()
+            if suffix not in IMAGE_EXTENSIONS:
+                suffix = ".jpg"
+            (caps_dir / f"capture_{i:02d}{suffix}").write_bytes(shot["bytes"])
+        st.session_state["cn_step"] = 3
+        st.rerun()
+    _cn_nav(show_back=True, back_to=1)
+
+
+def _cn_step_golden() -> None:
+    item_id = st.session_state["cn_item_id"]
+    st.subheader(f"3. Choose the golden board — `{item_id}`")
+    st.caption(
+        "Pick the sharpest, best-lit, verified-good board — it becomes the "
+        "canonical reference (`golden_board.jpg`) that all future boards of "
+        "this item are compared against."
+    )
+    caps_dir = item_dir(item_id) / "captures"
+    captures = sorted(p for p in caps_dir.iterdir()
+                      if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+                      ) if caps_dir.is_dir() else []
+    if not captures:
+        st.warning("No saved captures found — go back and capture good boards first.")
+        _cn_nav(show_back=True, back_to=2)
+        return
+
+    per_row = 4
+    for row_start in range(0, len(captures), per_row):
+        cols = st.columns(per_row)
+        for col, idx in zip(cols, range(row_start,
+                                        min(row_start + per_row, len(captures)))):
+            with col:
+                st.image(str(captures[idx]), caption=f"#{idx + 1}",
+                         use_container_width=True)
+    choice = st.radio(
+        "Golden board", list(range(len(captures))),
+        format_func=lambda i: f"#{i + 1} — {captures[i].name}",
+        horizontal=True, key="cn_golden_pick",
+    )
+
+    if st.button("Next → set as golden", type="primary", key="cn_next_3"):
+        shutil.copy2(captures[choice], item_dir(item_id) / "golden_board.jpg")
+        st.session_state["cn_step"] = 4
+        st.rerun()
+    _cn_nav(show_back=True, back_to=2)
+
+
+def _cn_step_components() -> None:
+    item_id = st.session_state["cn_item_id"]
+    st.subheader(f"4. Expected components — `{item_id}`")
+    golden = item_dir(item_id) / "golden_board.jpg"
+    if golden.is_file():
+        st.image(str(golden), caption="Golden board (set in step 3)", width=420)
+
+    st.info(
+        "**Honest status: the component list starts EMPTY.** The wizard writes "
+        "`expected_components.json` as a template "
+        '(`{"item": ..., "components": [], "annotation_status": "pending"}`) — '
+        "real component definitions (reference designator, class, bbox, "
+        "expected angle per part; format in data/README.md) come from "
+        "ANNOTATION later, guided by docs/data_collection_guide.md and the "
+        "**Dataset Review** page. Until the list is annotated and a model is "
+        "trained, inspection verdicts for this item stay in a **setup "
+        "pending** state instead of running against an empty reference."
+    )
+
+    if st.button("✔ Finish — register item", type="primary", key="cn_finish"):
+        try:
+            create_item(item_id, st.session_state.get("cn_name", item_id),
+                        st.session_state.get("cn_desc", ""),
+                        st.session_state.get("cn_rev", ""))
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+        write_item_expected_components(item_id)
+        refresh_item_registry_entry(item_id)
+        st.session_state["cn_done"] = item_id
+        st.rerun()
+    _cn_nav(show_back=True, back_to=3)
+
+
+def _create_new_success(item_id: str) -> None:
+    item = get_item(item_id) or {"id": item_id, "name": item_id}
+    st.progress(1.0, text="Done — item registered")
+    st.success(
+        f"🎉 Item **{item.get('name') or item_id}** registered as `{item_id}` "
+        f"under `data/items/{item_id}/` — golden board set, "
+        f"{_count_item_components(item_id)} components annotated "
+        f"(status: {item_status(item)})."
+    )
+    st.markdown(
+        "**Next steps to make this item inspectable:**\n"
+        "1. Select it as the **Active item** in the sidebar.\n"
+        "2. Capture 50–100 boards in **Inspection & Training → Training** mode "
+        f"(Board variant defaults to `{item_id}`).\n"
+        "3. Annotate components (docs/data_collection_guide.md · Dataset "
+        f"Review) and fill `data/items/{item_id}/expected_components.json`.\n"
+        "4. Train via `notebooks/train_ppyoloe_colab.ipynb`, export and deploy "
+        "the detector model."
+    )
+    if st.button("➕ Start another item", type="primary", key="cn_again"):
+        _cn_reset()
+        st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # Page: Dashboard (MONITOR) — the management landing page
 # ---------------------------------------------------------------------------
 
@@ -2042,6 +2532,38 @@ def main() -> None:
     if cfg is None:
         st.stop()
 
+    # --- active item (golden reference selection) -----------------------------
+    # The demo board is the default; registered items (BUILD · ➕ Create New)
+    # override golden.image / golden.expected_components IN MEMORY (mirroring
+    # the demo-cfg pattern) — configs/pipeline.yaml is never rewritten.
+    items = list_items()
+    labels = [DEFAULT_ITEM_LABEL] + [
+        f"{it.get('name') or it['id']} (`{it['id']}` — {item_status(it)})"
+        for it in items
+    ]
+    prev_active = st.session_state.get("active_item")
+    default_idx = 0
+    if prev_active:
+        for i, it in enumerate(items, start=1):
+            if it["id"] == prev_active:
+                default_idx = i
+                break
+    pick = st.sidebar.selectbox(
+        "Active item", list(range(len(labels))),
+        format_func=lambda i: labels[i], index=default_idx,
+        key="active_item_pick",
+        help="Which product the golden reference belongs to. 'Default (demo "
+             "board)' uses configs/pipeline.yaml as-is; a registered item "
+             "repoints golden.image / golden.expected_components in memory.",
+    )
+    active_item = items[pick - 1]["id"] if pick > 0 else None
+    if active_item != prev_active and active_item:
+        # Training mode's Board variant follows the newly selected item.
+        st.session_state["training_variant"] = active_item
+    st.session_state["active_item"] = active_item
+    if active_item:
+        cfg = _item_cfg_override(cfg, active_item)
+
     if page == "Inspection & Training":
         page_inspection_training(cfg)
     elif page == "Review & Repair":
@@ -2052,6 +2574,8 @@ def main() -> None:
         page_spc(cfg)
     elif page == "Dataset Review":
         page_labeling()
+    elif page == "➕ Create New":
+        page_create_new()
     elif page == "Dataset & Training":
         page_dataset(cfg)
     elif page == "Audit Trail":
